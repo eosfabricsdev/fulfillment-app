@@ -242,7 +242,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   const mainOrdersResult = await queryOrders(
     admin,
-    `-status:cancelled`,
+    `status:open -status:cancelled`,
   );
 
   const pickedTodayResult = await queryOrders(
