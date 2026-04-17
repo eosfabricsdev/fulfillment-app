@@ -96,6 +96,10 @@ type CutListItem = {
   productImageAlt: string | null;
 };
 
+function isPickedByTag(orderTags: string[]): boolean {
+  return orderTags.some((tag) => tag.toLowerCase().startsWith("Picked by"));
+}
+
 function toCutListItems(
   orders: RawOrder[],
   options?: {
@@ -578,9 +582,6 @@ export default function CutListPage() {
     return orderTags.some((tag) => tag.toLowerCase() === "rush");
   }
 
-  function isPickedByTag(orderTags: string[]): boolean {
-    return orderTags.some((tag) => tag.toLowerCase().startsWith("Picked by"));
-  }
 
   const getPickedByName = (orderTags: string[]): string => {
     const excludeTags = ["picked", "partially picked", "printed", "rush"];
