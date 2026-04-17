@@ -2,7 +2,7 @@
 
 client_id = "dd9eccba58a0c0d4601acf0040dd2116"
 name = "eos-fabrics-fulfillment-list"
-application_url = "https://manufacturer-sauce-provided-brian.trycloudflare.com"
+application_url = "https://fulfillment-app-two.vercel.app"
 embedded = true
 
 [build]
@@ -25,7 +25,7 @@ api_version = "2026-07"
 scopes = "write_metaobject_definitions,write_metaobjects,write_products,read_orders,write_orders,read_products,read_merchant_managed_fulfillment_orders,read_customers"
 
 [auth]
-redirect_urls = [ "https://manufacturer-sauce-provided-brian.trycloudflare.com/api/auth" ]
+redirect_urls = [ "https://fulfillment-app-two.vercel.app/api/auth" ]
 
 [product.metafields.app.demo_info]
 type = "single_line_text_field"

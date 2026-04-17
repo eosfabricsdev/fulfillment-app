@@ -1,0 +1,15 @@
+{
+    "compilerOptions": {
+      "jsx": "react-jsx",
+      "jsxImportSource": "preact",
+      "target": "ES2020",
+      "checkJs": true,
+      "allowJs": true,
+      "moduleResolution": "node",
+      "esModuleInterop": true,
+      "noEmit": true,
+      "skipLibCheck": true,
+      "types": ["@shopify/app-bridge-types", "@shopify/app-bridge-ui-types"]
+    },
+    "include": ["**/*.ts", "**/*.tsx", "**/*.d.ts"]
+  }
