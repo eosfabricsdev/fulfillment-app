@@ -113,6 +113,7 @@ function toCutListItems(
   const items: CutListItem[] = [];
 
   for (const order of orders) {
+    if (isPickedByTag(order.tags ?? [])) continue;
     const hasHold = order.fulfillmentOrders.nodes.some(
       (fo) => fo.fulfillmentHolds.length > 0,
     );
@@ -125,7 +126,7 @@ function toCutListItems(
         if (lineItem.currentQuantity === 0) continue;
         if (isPickedByTag(order.tags ?? [])) continue;
       }
-
+      
       if (lineItem.sku === VIRTUAL_SKU) continue;
 
       const binNumber =
@@ -250,7 +251,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   const mainOrdersResult = await queryOrders(
     admin,
-    `status:open -status:cancelled`,
+    `fulfillment_status:unfulfilled -status:cancelled -tag:picked -tag:'picked by EasyScan'`,
   );
 
   const pickedTodayResult = await queryOrders(
