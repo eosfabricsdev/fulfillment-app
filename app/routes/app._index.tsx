@@ -97,7 +97,10 @@ type CutListItem = {
 };
 
 function isPickedByTag(orderTags: string[]): boolean {
-  return orderTags.some((tag) => tag.toLowerCase().startsWith("Picked by"));
+  return orderTags.some((tag) => {
+    const normalized = tag.trim().toLowerCase();
+    return normalized.includes("picked by");
+  });
 }
 
 function toCutListItems(
