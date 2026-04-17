@@ -1355,8 +1355,16 @@ const multipleGroupBackground =
     background: isActive ? "strong" : multipleGroupBackground,
   }}
 >
-  <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
-    <s-text>{item.orderTags.join(", ") || "-"}</s-text>
+<s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
+    {item.orderTags.length > 0 ? (
+      <s-stack gap="small" direction="inline">
+        {item.orderTags.map((tag) => (
+          <s-badge key={tag}>{tag}</s-badge>
+        ))}
+      </s-stack>
+    ) : (
+      <s-text>-</s-text>
+    )}
   </s-clickable>
 </s-table-cell>
                       </s-clickable>
