@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { useEffect, useMemo, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { useFetcher, useLoaderData } from "react-router";
+import { useFetcher, useLoaderData, useRevalidator } from "react-router";
 import { authenticate } from "../shopify.server";
 
 const VIRTUAL_SKU = "85496775805861";
@@ -116,6 +116,7 @@ function toCutListItems(
       if (!includePicked) {
         if (lineItem.fulfillmentStatus === "FULFILLED") continue;
         if (lineItem.currentQuantity === 0) continue;
+        if (isPickedByTag(order.tags ?? [])) continue;
       }
 
       if (lineItem.sku === VIRTUAL_SKU) continue;
@@ -316,13 +317,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 export default function CutListPage() {
   const data = useLoaderData<typeof loader>();
   const tagFetcher = useFetcher();
+  const revalidator = useRevalidator();
 
   const [cutListItems, setCutListItems] = useState<CutListItem[]>(
     data.cutListItems || [],
   );
   useEffect(() => {
     setCutListItems(data.cutListItems || []);
-  }, [data.cutListItems]);
+    setPickedTodayItems(data.pickedTodayItems || []);
+    setLastUpdated(new Date());
+  }, [data.cutListItems, data.pickedTodayItems]);
 
   const [pageInfo] = useState<any>(data.pageInfo || null);
   const [loading] = useState<boolean>(false);
@@ -336,7 +340,9 @@ export default function CutListPage() {
   const [currentFilter, setCurrentFilter] = useState<
     "all" | "rush" | "rollEnds" | "swatches" | "pickedToday" | "multiple"
   >("all");
-  const [pickedTodayItems] = useState<CutListItem[]>(data.pickedTodayItems || []);
+  const [pickedTodayItems, setPickedTodayItems] = useState<CutListItem[]>(
+    data.pickedTodayItems || [],
+  );
   const [activeLineId, setActiveLineId] = useState<string | null>(null);
   const [showProductCountModal, setShowProductCountModal] =
     useState<boolean>(false);
@@ -381,11 +387,21 @@ export default function CutListPage() {
 
   useEffect(() => {
     const refreshInterval = setInterval(() => {
-      window.location.reload();
+      const activeEl = document.activeElement as HTMLElement | null;
+      const isTyping =
+        activeEl?.tagName === "INPUT" ||
+        activeEl?.tagName === "TEXTAREA" ||
+        activeEl?.getAttribute("contenteditable") === "true";
+  
+      if (isTyping) return;
+      if (revalidator.state !== "idle") return;
+      if (showProductCountModal || !!previewImage) return;
+  
+      revalidator.revalidate();
     }, 30000);
   
     return () => clearInterval(refreshInterval);
-  }, []);
+  }, [revalidator, showProductCountModal, previewImage]);
 
   useEffect(() => {
     setLastUpdated(new Date());
@@ -560,6 +576,10 @@ export default function CutListPage() {
 
   function isRushOrder(orderTags: string[]): boolean {
     return orderTags.some((tag) => tag.toLowerCase() === "rush");
+  }
+
+  function isPickedByTag(orderTags: string[]): boolean {
+    return orderTags.some((tag) => tag.toLowerCase().startsWith("Picked by"));
   }
 
   const getPickedByName = (orderTags: string[]): string => {
