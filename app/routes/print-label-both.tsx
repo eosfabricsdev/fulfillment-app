@@ -46,13 +46,6 @@ function escapeHtml(value: string) {
     .replace(/>/g, "&gt;");
 }
 
-function getQtyDisplay(quantity: number, variantTitle: string | null) {
-  if (variantTitle?.includes("By the Yard")) {
-    return `${quantity} units / ${(quantity / 4).toFixed(2)} yds`;
-  }
-  return `${quantity} units`;
-}
-
 function generateBinLabelHtml(orderName: string): string {
   const orderNum = orderName.replace("#", "");
   const safeOrderName = escapeHtml(orderName);
@@ -75,10 +68,8 @@ function generateBinLabelHtml(orderName: string): string {
 
 function generateCutLabelHtml(data: PrintData): string {
   const safeTitle = escapeHtml(data.productTitle);
-  const safeVariant = escapeHtml(data.variantTitle || "");
   const safeSku = escapeHtml(data.sku || "");
   const safeOrderName = escapeHtml(data.orderName);
-  const qtyDisplay = escapeHtml(getQtyDisplay(data.quantity, data.variantTitle));
   const barcode = data.barcode ? escapeHtml(data.barcode) : "";
 
   return `
@@ -87,11 +78,7 @@ function generateCutLabelHtml(data: PrintData): string {
         <div class="product-title">${safeTitle}</div>
 
         <div class="meta-line">
-          ${safeVariant ? `<span>${safeVariant}</span>` : ""}
-          ${safeVariant ? `<span class="divider">•</span>` : ""}
           <span>${safeOrderName}</span>
-          <span class="divider">•</span>
-          <span>${qtyDisplay}</span>
         </div>
 
         ${
@@ -130,14 +117,9 @@ export default function PrintLabelBothPage() {
       if (bin && JsBarcode) {
         JsBarcode(bin, bin.getAttribute("data-barcode-value"), {
           format: "CODE128",
-          displayValue: true,
-          textAlign: "center",
-          textPosition: "bottom",
-          font: "Arial",
-          fontOptions: "bold",
-          fontSize: 11,
+          displayValue: false,
           lineColor: "#000000",
-          height: 32,
+          height: 26,
           margin: 0,
           width: 1.6,
         });
@@ -147,14 +129,10 @@ export default function PrintLabelBothPage() {
         JsBarcode(cut, cut.getAttribute("data-barcode-value"), {
           format: "CODE128",
           displayValue: false,
-          textAlign: "center",
-          font: "Arial",
-          fontOptions: "bold",
-          fontSize: 11,
           lineColor: "#000000",
-          height: 30,
+          height: 20,
           margin: 0,
-          width: 1.6,
+          width: 1.4,
         });
       }
 
@@ -253,10 +231,10 @@ export default function PrintLabelBothPage() {
           }
 
           .bin-order {
-            font-size: 11pt;
+            font-size: 9pt;
             font-weight: 900;
-            line-height: 1.05;
-            margin-bottom: 1.2mm;
+            line-height: 1.1;
+            margin-bottom: 1mm;
             letter-spacing: 0.2px;
           }
 

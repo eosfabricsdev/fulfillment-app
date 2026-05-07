@@ -251,12 +251,12 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   const mainOrdersResult = await queryOrders(
     admin,
-    `fulfillment_status:unfulfilled -status:cancelled -tag:picked -tag:'picked by EasyScan'`,
+    `(fulfillment_status:unfulfilled OR fulfillment_status:on_hold) -status:cancelled -tag:picked -tag:'picked by EasyScan'`,
   );
 
   const pickedTodayResult = await queryOrders(
     admin,
-    `tag:picked OR tag:'partially picked'`,
+    `(tag:picked OR tag:'partially picked') -fulfillment_status:fulfilled`,
   );
 
   const rawOrders: RawOrder[] = mainOrdersResult.edges.map((e: any) => e.node);
@@ -331,9 +331,26 @@ export default function CutListPage() {
     data.cutListItems || [],
   );
   useEffect(() => {
-    setCutListItems(data.cutListItems || []);
-    setPickedTodayItems(data.pickedTodayItems || []);
+    const newCutListItems = data.cutListItems || [];
+    const newPickedTodayItems = data.pickedTodayItems || [];
+    setCutListItems(newCutListItems);
+    setPickedTodayItems(newPickedTodayItems);
     setLastUpdated(new Date());
+
+    const persistedPicked = new Set<string>();
+    for (const item of [...newCutListItems, ...newPickedTodayItems]) {
+      const numericId = item.lineItemId.split("/").pop();
+      if (!numericId) continue;
+      const tagToFind = `picked-line:${numericId}`.toLowerCase();
+      if (item.orderTags.some((t) => t.toLowerCase() === tagToFind)) {
+        persistedPicked.add(item.lineItemId);
+      }
+    }
+    setPickedItems((prev) => {
+      const next = new Set(prev);
+      persistedPicked.forEach((id) => next.add(id));
+      return next;
+    });
   }, [data.cutListItems, data.pickedTodayItems]);
 
   const [pageInfo] = useState<any>(data.pageInfo || null);
@@ -346,7 +363,14 @@ export default function CutListPage() {
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
   const [secondsSinceUpdate, setSecondsSinceUpdate] = useState<number>(0);
   const [currentFilter, setCurrentFilter] = useState<
-    "all" | "rush" | "rollEnds" | "swatches" | "pickedToday" | "multiple"
+    | "all"
+    | "rush"
+    | "rollEnds"
+    | "swatches"
+    | "pickedToday"
+    | "multiple"
+    | "hold"
+    | "readyToShip"
   >("all");
   const [pickedTodayItems, setPickedTodayItems] = useState<CutListItem[]>(
     data.pickedTodayItems || [],
@@ -370,6 +394,36 @@ export default function CutListPage() {
     () => cutListItems.filter((item) => isRushOrder(item.orderTags)),
     [cutListItems],
   );
+
+  const holdItems = useMemo(() => {
+    const seen = new Map<string, CutListItem>();
+    for (const item of cutListItems) {
+      if (item.hasHold) seen.set(item.lineItemId, item);
+    }
+    for (const item of pickedTodayItems) {
+      if (item.hasHold && !seen.has(item.lineItemId)) {
+        seen.set(item.lineItemId, item);
+      }
+    }
+    return Array.from(seen.values());
+  }, [cutListItems, pickedTodayItems]);
+
+  const remainingByOrder = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const item of cutListItems) {
+      if (item.sku === VIRTUAL_SKU) continue;
+      if (pickedItems.has(item.lineItemId)) continue;
+      counts.set(item.orderId, (counts.get(item.orderId) || 0) + 1);
+    }
+    return counts;
+  }, [cutListItems, pickedItems]);
+
+  const [completionMessage, setCompletionMessage] = useState<string | null>(null);
+  const [noteModalContent, setNoteModalContent] = useState<{
+    orderName: string;
+    note: string;
+  } | null>(null);
+  const [acknowledgedNotes, setAcknowledgedNotes] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     if (tagFetcher.state === "idle" && tagFetcher.data?.ok) {
@@ -586,6 +640,18 @@ export default function CutListPage() {
     return orderTags.some((tag) => tag.toLowerCase() === "rush");
   }
 
+  function isItemCut(item: CutListItem): boolean {
+    const isOrderFullyPicked = item.orderTags.some(
+      (t) => t.toLowerCase() === "picked",
+    );
+    if (isOrderFullyPicked) return true;
+
+    const numericId = item.lineItemId.split("/").pop();
+    if (!numericId) return false;
+    const lineTag = `picked-line:${numericId}`.toLowerCase();
+    return item.orderTags.some((t) => t.toLowerCase() === lineTag);
+  }
+
 
   const getPickedByName = (orderTags: string[]): string => {
     const excludeTags = ["picked", "partially picked", "printed", "rush"];
@@ -601,7 +667,7 @@ export default function CutListPage() {
 
   const getFilteredItems = (): CutListItem[] => {
     if (currentFilter === "pickedToday") {
-      return pickedTodayItems;
+      return pickedTodayItems.filter(isItemCut);
     }
 
     if (currentFilter === "rush") {
@@ -612,8 +678,33 @@ export default function CutListPage() {
       const multipleItems = cutListItems.filter((item) =>
         item.orderTags.some((t) => t.toLowerCase() === "multiple orders"),
       );
-    
+
       return applyCustomerOnlySort(multipleItems);
+    }
+
+    if (currentFilter === "hold") {
+      return applyCustomerOnlySort(holdItems);
+    }
+
+    if (currentFilter === "readyToShip") {
+      const readyItems = pickedTodayItems.filter(
+        (item) =>
+          item.orderTags.some((t) => t.toLowerCase() === "picked") &&
+          !item.hasHold,
+      );
+      const orderGroups = new Map<string, CutListItem[]>();
+      for (const item of readyItems) {
+        if (!orderGroups.has(item.orderId)) {
+          orderGroups.set(item.orderId, []);
+        }
+        orderGroups.get(item.orderId)!.push(item);
+      }
+      const sortedGroups = Array.from(orderGroups.values()).sort(
+        (a, b) =>
+          new Date(a[0].orderCreatedAt).getTime() -
+          new Date(b[0].orderCreatedAt).getTime(),
+      );
+      return sortedGroups.flat();
     }
 
     const allItems = applyRushFirstSort(cutListItems);
@@ -705,44 +796,33 @@ export default function CutListPage() {
       if (allAreSwatches) swatchesOnlyCount++;
     });
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const todayStr = today.toISOString().split("T")[0];
-
-    const filteredPickedTodayItems = pickedTodayItems.filter(
-      (item) => item.sku !== VIRTUAL_SKU,
+    const filteredPreviouslyCutItems = pickedTodayItems.filter(
+      (item) => item.sku !== VIRTUAL_SKU && isItemCut(item),
     );
-    const uniqueOrdersToday = new Set<string>();
-    let itemsCountToday = 0;
+    const uniquePreviouslyCutOrders = new Set(
+      filteredPreviouslyCutItems.map((item) => item.orderId),
+    );
 
-    filteredPickedTodayItems.forEach((item) => {
-      const hasTimestampToday = item.orderTags.some((tag) => {
-        try {
-          const date = new Date(tag);
-          if (!isNaN(date.getTime())) {
-            const tagDateStr = date.toISOString().split("T")[0];
-            return tagDateStr === todayStr;
-          }
-        } catch (err) {
-          return false;
-        }
-        return false;
-      });
-
-      if (hasTimestampToday) {
-        uniqueOrdersToday.add(item.orderId);
-        itemsCountToday++;
-      }
-    });
+    const readyToShipOrders = new Set(
+      pickedTodayItems
+        .filter(
+          (item) =>
+            item.sku !== VIRTUAL_SKU &&
+            item.orderTags.some((t) => t.toLowerCase() === "picked") &&
+            !item.hasHold,
+        )
+        .map((item) => item.orderId),
+    );
 
     return {
       rushOrders: rushOrders.length,
-      ordersCutToday: uniqueOrdersToday.size,
-      itemsCutToday: itemsCountToday,
+      ordersPreviouslyCut: uniquePreviouslyCutOrders.size,
+      itemsPreviouslyCut: filteredPreviouslyCutItems.length,
       totalOrders: uniqueOrders.size,
       totalCuts,
       rollEndsOnly: rollEndsOnlyCount,
       swatchesOnly: swatchesOnlyCount,
+      readyToShip: readyToShipOrders.size,
     };
   };
 
@@ -780,28 +860,26 @@ export default function CutListPage() {
     setPickedItems((prev) => new Set(prev).add(item.lineItemId));
     setBarcodeInputs((prev) => ({ ...prev, [itemKey]: "" }));
 
+    if (item.orderNote && !acknowledgedNotes.has(item.orderId)) {
+      setNoteModalContent({
+        orderName: item.orderName,
+        note: item.orderNote,
+      });
+      setAcknowledgedNotes((prev) => new Set(prev).add(item.orderId));
+    }
+
     const orderItems = cutListItems.filter((i) => i.orderId === item.orderId);
     const pickedCount = orderItems.filter(
       (i) => pickedItems.has(i.lineItemId) || i.lineItemId === item.lineItemId,
     ).length;
     const totalCount = orderItems.filter((i) => i.sku !== VIRTUAL_SKU).length;
     const timestamp = new Date().toISOString();
+    const numericLineId = item.lineItemId.split("/").pop() || item.lineItemId;
+    const lineItemTag = `picked-line:${numericLineId}`;
 
-    if (pickedCount === 1) {
-      submitTagsAdd(item.orderId, ["partially picked", timestamp]);
-      setCutListItems((prev) =>
-        prev.map((i) =>
-          i.orderId === item.orderId
-            ? {
-                ...i,
-                orderTags: Array.from(new Set([...i.orderTags, "partially picked", timestamp])),
-              }
-            : i,
-        ),
-      );
-    } else if (pickedCount === totalCount) {
+    if (pickedCount === totalCount) {
       submitTagsRemove(item.orderId, ["partially picked"]);
-      submitTagsAdd(item.orderId, ["picked", timestamp]);
+      submitTagsAdd(item.orderId, ["picked", timestamp, lineItemTag]);
 
       setCutListItems((prev) =>
         prev.map((i) =>
@@ -813,8 +891,39 @@ export default function CutListPage() {
                     ...i.orderTags.filter((tag) => tag !== "partially picked"),
                     "picked",
                     timestamp,
+                    lineItemTag,
                   ]),
                 ),
+              }
+            : i,
+        ),
+      );
+
+      setCompletionMessage(
+        `Order ${item.orderName} is complete. All items cut.`,
+      );
+    } else if (pickedCount === 1) {
+      submitTagsAdd(item.orderId, ["partially picked", timestamp, lineItemTag]);
+      setCutListItems((prev) =>
+        prev.map((i) =>
+          i.orderId === item.orderId
+            ? {
+                ...i,
+                orderTags: Array.from(
+                  new Set([...i.orderTags, "partially picked", timestamp, lineItemTag]),
+                ),
+              }
+            : i,
+        ),
+      );
+    } else {
+      submitTagsAdd(item.orderId, [lineItemTag]);
+      setCutListItems((prev) =>
+        prev.map((i) =>
+          i.orderId === item.orderId
+            ? {
+                ...i,
+                orderTags: Array.from(new Set([...i.orderTags, lineItemTag])),
               }
             : i,
         ),
@@ -900,8 +1009,8 @@ export default function CutListPage() {
           >
             <s-clickable onClick={() => setCurrentFilter("pickedToday")}>
               <s-stack gap="small">
-                <s-text color="subdued">Orders Cut Today</s-text>
-                <s-text type="strong">{stats.ordersCutToday}</s-text>
+                <s-text color="subdued">Orders Previously Cut</s-text>
+                <s-text type="strong">{stats.ordersPreviouslyCut}</s-text>
               </s-stack>
             </s-clickable>
           </s-box>
@@ -915,8 +1024,8 @@ export default function CutListPage() {
           >
             <s-clickable onClick={() => setCurrentFilter("pickedToday")}>
               <s-stack gap="small">
-                <s-text color="subdued">Items Cut Today</s-text>
-                <s-text type="strong">{stats.itemsCutToday}</s-text>
+                <s-text color="subdued">Items Previously Cut</s-text>
+                <s-text type="strong">{stats.itemsPreviouslyCut}</s-text>
               </s-stack>
             </s-clickable>
           </s-box>
@@ -1005,6 +1114,38 @@ export default function CutListPage() {
 </s-box>
 
           <s-box
+  padding="base"
+  background={currentFilter === "hold" ? "subdued" : "base"}
+  borderWidth="base"
+  borderColor="base"
+  borderRadius="base"
+>
+  <s-clickable onClick={() => setCurrentFilter("hold")}>
+    <s-stack gap="small">
+      <s-text color="subdued">Fulfillment Hold</s-text>
+      <s-text type="strong" tone="critical">
+        {holdItems.length}
+      </s-text>
+    </s-stack>
+  </s-clickable>
+</s-box>
+
+          <s-box
+  padding="base"
+  background={currentFilter === "readyToShip" ? "subdued" : "base"}
+  borderWidth="base"
+  borderColor="base"
+  borderRadius="base"
+>
+  <s-clickable onClick={() => setCurrentFilter("readyToShip")}>
+    <s-stack gap="small">
+      <s-text color="subdued">Ready to Ship</s-text>
+      <s-text type="strong" tone="success">{stats.readyToShip}</s-text>
+    </s-stack>
+  </s-clickable>
+</s-box>
+
+          <s-box
             padding="base"
             background="base"
             borderWidth="base"
@@ -1019,7 +1160,9 @@ export default function CutListPage() {
         </s-stack>
       </s-section>
 
-      {(currentFilter === "pickedToday" || currentFilter === "rush") && (
+      {(currentFilter === "pickedToday" ||
+        currentFilter === "rush" ||
+        currentFilter === "readyToShip") && (
         <s-section>
           <s-button variant="secondary" onClick={() => setCurrentFilter("all")}>
             Back to Cut List
@@ -1038,6 +1181,7 @@ export default function CutListPage() {
             <s-table-header listSlot="labeled"></s-table-header>
             <s-table-header listSlot="primary">Order Number</s-table-header>
             <s-table-header listSlot="labeled">Customer Name</s-table-header>
+            <s-table-header listSlot="labeled">Order Note</s-table-header>
             <s-table-header listSlot="labeled">Bin Number</s-table-header>
             <s-table-header listSlot="labeled">Product SKU</s-table-header>
             <s-table-header listSlot="labeled">Image</s-table-header>
@@ -1046,7 +1190,9 @@ export default function CutListPage() {
             <s-table-header listSlot="labeled">Order Time</s-table-header>
             <s-table-header listSlot="labeled">Product Count</s-table-header>
             <s-table-header listSlot="labeled">
-              {currentFilter === "pickedToday" ? "Picked By" : "Actions"}
+              {currentFilter === "pickedToday" || currentFilter === "readyToShip"
+                ? "Picked By"
+                : "Actions"}
             </s-table-header>
             <s-table-header listSlot="labeled">Order Tags</s-table-header>
             <s-table-header listSlot="labeled"></s-table-header>
@@ -1058,8 +1204,10 @@ export default function CutListPage() {
                 <s-table-cell>
                   <s-text color="subdued">
                     {currentFilter === "pickedToday"
-                      ? "No orders picked today"
-                      : "No orders to pick"}
+                      ? "No previously cut items"
+                      : currentFilter === "readyToShip"
+                        ? "No orders ready to ship"
+                        : "No orders to pick"}
                   </s-text>
                 </s-table-cell>
               </s-table-row>
@@ -1077,6 +1225,14 @@ export default function CutListPage() {
                 const alreadyPrinted = item.orderTags.some(
                   (t) => t.toLowerCase() === "printed",
                 );
+                const isOrderFullyPicked = item.orderTags.some(
+                  (t) => t.toLowerCase() === "picked",
+                );
+                const isAlreadyCut =
+                  isOrderFullyPicked || pickedItems.has(item.lineItemId);
+                const isFinalCut =
+                  (remainingByOrder.get(item.orderId) || 0) === 1 &&
+                  !pickedItems.has(item.lineItemId);
 
                 const prevItem = filteredItems[index - 1];
 const isNewCustomerGroup =
@@ -1094,12 +1250,28 @@ const customerGroupIndex = filteredItems
     return count;
   }, 0);
 
+const orderGroupIndex = filteredItems
+  .slice(0, index + 1)
+  .reduce((count, currentItem, currentIndex, arr) => {
+    if (
+      currentIndex === 0 ||
+      arr[currentIndex - 1].orderId !== currentItem.orderId
+    ) {
+      return count + 1;
+    }
+    return count;
+  }, 0);
+
 const multipleGroupBackground =
   currentFilter === "multiple"
     ? customerGroupIndex % 2 === 0
       ? "subdued"
       : "base"
-    : "transparent";
+    : currentFilter === "readyToShip"
+      ? orderGroupIndex % 2 === 0
+        ? "subdued"
+        : "base"
+      : "transparent";
 
                 return (
                   <s-table-row
@@ -1126,6 +1298,26 @@ const multipleGroupBackground =
   {isRush && <s-badge tone="critical">RUSH</s-badge>}
   {isMultipleOrders && <s-badge tone="info">MULTIPLE ORDERS</s-badge>}
   {item.hasHold && <s-badge tone="critical">FULFILLMENT HOLD</s-badge>}
+  {isAlreadyCut && <s-badge tone="warning">ALREADY CUT</s-badge>}
+  {isFinalCut && (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        padding: "2px 8px",
+        backgroundColor: "#7C3AED",
+        color: "#FFFFFF",
+        fontSize: "0.75rem",
+        fontWeight: 600,
+        borderRadius: "8px",
+        lineHeight: 1.4,
+        letterSpacing: "0.02em",
+      }}
+    >
+      FINAL CUT
+    </span>
+  )}
+  {item.orderNote && <s-badge tone="caution">📝 NOTE</s-badge>}
   <s-link href={`shopify://admin/orders/${orderIdNum}`}>
     {item.orderName}
   </s-link>
@@ -1156,6 +1348,33 @@ const multipleGroupBackground =
                             <s-text>{item.customerName}</s-text>
                           )}
                         </s-clickable>
+                      </s-box>
+                    </s-table-cell>
+
+                    <s-table-cell
+  style={{
+    background: isActive ? "strong" : multipleGroupBackground,
+  }}
+>
+                      <s-box
+                        padding="small"
+                        background={isActive ? "strong" : multipleGroupBackground}
+                        borderRadius="small"
+                      >
+                        {item.orderNote ? (
+                          <s-clickable
+                            onClick={() =>
+                              setNoteModalContent({
+                                orderName: item.orderName,
+                                note: item.orderNote!,
+                              })
+                            }
+                          >
+                            <s-text type="strong">📝 View note</s-text>
+                          </s-clickable>
+                        ) : (
+                          <s-text color="subdued">—</s-text>
+                        )}
                       </s-box>
                     </s-table-cell>
 
@@ -1291,7 +1510,8 @@ const multipleGroupBackground =
     background: isActive ? "strong" : multipleGroupBackground,
   }}
 >
-                      {currentFilter === "pickedToday" ? (
+                      {currentFilter === "pickedToday" ||
+                      currentFilter === "readyToShip" ? (
                         <s-text>{getPickedByName(item.orderTags)}</s-text>
                       ) : printedLines.has(item.lineItemId) ? (
                         <s-stack gap="small">
@@ -1418,6 +1638,54 @@ const multipleGroupBackground =
           onClick={() => setShowProductCountModal(false)}
         >
           Close
+        </s-button>
+      </s-modal>
+
+      <s-modal
+        id="order-note-modal"
+        heading={`Note on Order ${noteModalContent?.orderName ?? ""}`}
+        ref={(el) => {
+          if (el && noteModalContent) {
+            el.showOverlay();
+          } else if (el && !noteModalContent) {
+            el.hideOverlay();
+          }
+        }}
+        onHide={() => setNoteModalContent(null)}
+      >
+        <s-box padding="base">
+          <s-text>{noteModalContent?.note}</s-text>
+        </s-box>
+        <s-button
+          slot="primary-action"
+          variant="primary"
+          onClick={() => setNoteModalContent(null)}
+        >
+          Acknowledge
+        </s-button>
+      </s-modal>
+
+      <s-modal
+        id="completion-modal"
+        heading="Order Complete"
+        ref={(el) => {
+          if (el && completionMessage) {
+            el.showOverlay();
+          } else if (el && !completionMessage) {
+            el.hideOverlay();
+          }
+        }}
+        onHide={() => setCompletionMessage(null)}
+      >
+        <s-box padding="base">
+          <s-text>{completionMessage}</s-text>
+        </s-box>
+        <s-button
+          slot="primary-action"
+          variant="primary"
+          onClick={() => setCompletionMessage(null)}
+        >
+          OK
         </s-button>
       </s-modal>
 
