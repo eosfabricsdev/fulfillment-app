@@ -25,6 +25,7 @@ type Variant = {
 
 type Product = {
   id: string;
+  productType: string | null;
   featuredImage: {
     url: string;
     altText: string | null;
@@ -84,6 +85,7 @@ type CutListItem = {
   lineItemId: string;
   productId: string;
   productTitle: string;
+  productType: string | null;
   sku: string;
   variantTitle: string | null;
   quantity: number;
@@ -158,6 +160,7 @@ function toCutListItems(
         allLineItems,
         productImage: lineItem.product?.featuredImage?.url || null,
         productImageAlt: lineItem.product?.featuredImage?.altText || null,
+        productType: lineItem.product?.productType || null,
       });
     }
   }
@@ -202,6 +205,7 @@ async function queryOrders(admin: any, query: string) {
                   variantTitle
                   product {
                     id
+                    productType
                     featuredImage {
                       url
                       altText
@@ -349,6 +353,19 @@ export default function CutListPage() {
     setPickedItems((prev) => {
       const next = new Set(prev);
       persistedPicked.forEach((id) => next.add(id));
+      return next;
+    });
+
+    const persistedPrinted = new Set<string>();
+    for (const item of [...newCutListItems, ...newPickedTodayItems]) {
+      if (!persistedPicked.has(item.lineItemId)) continue;
+      if (item.orderTags.some((t) => t.toLowerCase() === "printed")) {
+        persistedPrinted.add(item.lineItemId);
+      }
+    }
+    setPrintedLines((prev) => {
+      const next = new Set(prev);
+      persistedPrinted.forEach((id) => next.add(id));
       return next;
     });
   }, [data.cutListItems, data.pickedTodayItems]);
@@ -796,11 +813,11 @@ export default function CutListPage() {
       if (allAreSwatches) swatchesOnlyCount++;
     });
 
-    const filteredPreviouslyCutItems = pickedTodayItems.filter(
+    const cutLogItems = pickedTodayItems.filter(
       (item) => item.sku !== VIRTUAL_SKU && isItemCut(item),
     );
-    const uniquePreviouslyCutOrders = new Set(
-      filteredPreviouslyCutItems.map((item) => item.orderId),
+    const uniqueCutLogOrders = new Set(
+      cutLogItems.map((item) => item.orderId),
     );
 
     const readyToShipOrders = new Set(
@@ -816,8 +833,8 @@ export default function CutListPage() {
 
     return {
       rushOrders: rushOrders.length,
-      ordersPreviouslyCut: uniquePreviouslyCutOrders.size,
-      itemsPreviouslyCut: filteredPreviouslyCutItems.length,
+      ordersCutLog: uniqueCutLogOrders.size,
+      itemsCutLog: cutLogItems.length,
       totalOrders: uniqueOrders.size,
       totalCuts,
       rollEndsOnly: rollEndsOnlyCount,
@@ -857,7 +874,6 @@ export default function CutListPage() {
     }
 
     setReadyToPrint((prev) => new Set(prev).add(item.lineItemId));
-    setPickedItems((prev) => new Set(prev).add(item.lineItemId));
     setBarcodeInputs((prev) => ({ ...prev, [itemKey]: "" }));
 
     if (item.orderNote && !acknowledgedNotes.has(item.orderId)) {
@@ -867,6 +883,17 @@ export default function CutListPage() {
       });
       setAcknowledgedNotes((prev) => new Set(prev).add(item.orderId));
     }
+  };
+
+  const openPrint = (
+    item: CutListItem,
+    includeBin: boolean,
+    options?: { skipWindow?: boolean; skipCut?: boolean },
+  ) => {
+    const skipWindow = options?.skipWindow ?? false;
+    const skipCut = options?.skipCut ?? false;
+    const includeCut = !skipCut;
+    const url = `/print-label-both?orderName=${encodeURIComponent(item.orderName)}&productTitle=${encodeURIComponent(item.productTitle)}&variantTitle=${encodeURIComponent(item.variantTitle || "")}&quantity=${item.quantity}&sku=${encodeURIComponent(item.sku || "")}&barcode=${encodeURIComponent(item.barcode || "")}&includeBin=${includeBin}&includeCut=${includeCut}`;
 
     const orderItems = cutListItems.filter((i) => i.orderId === item.orderId);
     const pickedCount = orderItems.filter(
@@ -876,10 +903,15 @@ export default function CutListPage() {
     const timestamp = new Date().toISOString();
     const numericLineId = item.lineItemId.split("/").pop() || item.lineItemId;
     const lineItemTag = `picked-line:${numericLineId}`;
+    const orderHadPrintedTag = item.orderTags.some(
+      (t) => t.toLowerCase() === "printed",
+    );
+    const printedTag = includeBin && !orderHadPrintedTag ? ["printed"] : [];
 
     if (pickedCount === totalCount) {
+      const tagsToAdd = ["picked", timestamp, lineItemTag, ...printedTag];
       submitTagsRemove(item.orderId, ["partially picked"]);
-      submitTagsAdd(item.orderId, ["picked", timestamp, lineItemTag]);
+      submitTagsAdd(item.orderId, tagsToAdd);
 
       setCutListItems((prev) =>
         prev.map((i) =>
@@ -889,9 +921,7 @@ export default function CutListPage() {
                 orderTags: Array.from(
                   new Set([
                     ...i.orderTags.filter((tag) => tag !== "partially picked"),
-                    "picked",
-                    timestamp,
-                    lineItemTag,
+                    ...tagsToAdd,
                   ]),
                 ),
               }
@@ -903,59 +933,41 @@ export default function CutListPage() {
         `Order ${item.orderName} is complete. All items cut.`,
       );
     } else if (pickedCount === 1) {
-      submitTagsAdd(item.orderId, ["partially picked", timestamp, lineItemTag]);
+      const tagsToAdd = [
+        "partially picked",
+        timestamp,
+        lineItemTag,
+        ...printedTag,
+      ];
+      submitTagsAdd(item.orderId, tagsToAdd);
+
       setCutListItems((prev) =>
         prev.map((i) =>
           i.orderId === item.orderId
             ? {
                 ...i,
-                orderTags: Array.from(
-                  new Set([...i.orderTags, "partially picked", timestamp, lineItemTag]),
-                ),
+                orderTags: Array.from(new Set([...i.orderTags, ...tagsToAdd])),
               }
             : i,
         ),
       );
     } else {
-      submitTagsAdd(item.orderId, [lineItemTag]);
+      const tagsToAdd = [lineItemTag, ...printedTag];
+      submitTagsAdd(item.orderId, tagsToAdd);
+
       setCutListItems((prev) =>
         prev.map((i) =>
           i.orderId === item.orderId
             ? {
                 ...i,
-                orderTags: Array.from(new Set([...i.orderTags, lineItemTag])),
+                orderTags: Array.from(new Set([...i.orderTags, ...tagsToAdd])),
               }
             : i,
         ),
       );
     }
 
-    const currentIndex = getFilteredItems().findIndex(
-      (i) => i.lineItemId === item.lineItemId,
-    );
-    const nextItem = getFilteredItems()[currentIndex + 1];
-    if (nextItem) {
-      setActiveLineId(nextItem.lineItemId);
-    }
-  };
-
-  const openPrint = (item: CutListItem, includeBin: boolean) => {
-    const url = `/print-label-both?orderName=${encodeURIComponent(item.orderName)}&productTitle=${encodeURIComponent(item.productTitle)}&variantTitle=${encodeURIComponent(item.variantTitle || "")}&quantity=${item.quantity}&sku=${encodeURIComponent(item.sku || "")}&barcode=${encodeURIComponent(item.barcode || "")}&includeBin=true`;
-
-    if (includeBin && !item.orderTags.some((t) => t.toLowerCase() === "printed")) {
-      submitTagsAdd(item.orderId, ["printed"]);
-      setCutListItems((prev) =>
-        prev.map((i) =>
-          i.orderId === item.orderId
-            ? {
-                ...i,
-                orderTags: Array.from(new Set([...i.orderTags, "printed"])),
-              }
-            : i,
-        ),
-      );
-    }
-
+    setPickedItems((prev) => new Set(prev).add(item.lineItemId));
     setPrintedLines((prev) => new Set(prev).add(item.lineItemId));
     setReadyToPrint((prev) => {
       const next = new Set(prev);
@@ -963,7 +975,32 @@ export default function CutListPage() {
       return next;
     });
 
-    window.open(url, "_blank");
+    if (!skipWindow) {
+      window.open(url, "_blank");
+    }
+
+    const itemsNow = getFilteredItems();
+    const currentIndex = itemsNow.findIndex(
+      (i) => i.lineItemId === item.lineItemId,
+    );
+    const nextItem = itemsNow[currentIndex + 1];
+    if (nextItem) {
+      setActiveLineId(nextItem.lineItemId);
+    }
+  };
+
+  const reprintLabel = (item: CutListItem, mode: "bin" | "cut") => {
+    const params = new URLSearchParams({
+      orderName: item.orderName,
+      productTitle: item.productTitle,
+      variantTitle: item.variantTitle || "",
+      quantity: String(item.quantity),
+      sku: item.sku || "",
+      barcode: item.barcode || "",
+      includeBin: mode === "bin" ? "true" : "false",
+      includeCut: mode === "cut" ? "true" : "false",
+    });
+    window.open(`/print-label-both?${params.toString()}`, "_blank");
   };
 
   const stats = getSummaryStats();
@@ -996,36 +1033,6 @@ export default function CutListPage() {
                 <s-text type="strong" tone="critical">
                   {stats.rushOrders}
                 </s-text>
-              </s-stack>
-            </s-clickable>
-          </s-box>
-
-          <s-box
-            padding="base"
-            background={currentFilter === "pickedToday" ? "subdued" : "base"}
-            borderWidth="base"
-            borderColor="base"
-            borderRadius="base"
-          >
-            <s-clickable onClick={() => setCurrentFilter("pickedToday")}>
-              <s-stack gap="small">
-                <s-text color="subdued">Orders Previously Cut</s-text>
-                <s-text type="strong">{stats.ordersPreviouslyCut}</s-text>
-              </s-stack>
-            </s-clickable>
-          </s-box>
-
-          <s-box
-            padding="base"
-            background={currentFilter === "pickedToday" ? "subdued" : "base"}
-            borderWidth="base"
-            borderColor="base"
-            borderRadius="base"
-          >
-            <s-clickable onClick={() => setCurrentFilter("pickedToday")}>
-              <s-stack gap="small">
-                <s-text color="subdued">Items Previously Cut</s-text>
-                <s-text type="strong">{stats.itemsPreviouslyCut}</s-text>
               </s-stack>
             </s-clickable>
           </s-box>
@@ -1147,6 +1154,36 @@ export default function CutListPage() {
 
           <s-box
             padding="base"
+            background={currentFilter === "pickedToday" ? "subdued" : "base"}
+            borderWidth="base"
+            borderColor="base"
+            borderRadius="base"
+          >
+            <s-clickable onClick={() => setCurrentFilter("pickedToday")}>
+              <s-stack gap="small">
+                <s-text color="subdued">Orders Cut Log</s-text>
+                <s-text type="strong">{stats.ordersCutLog}</s-text>
+              </s-stack>
+            </s-clickable>
+          </s-box>
+
+          <s-box
+            padding="base"
+            background={currentFilter === "pickedToday" ? "subdued" : "base"}
+            borderWidth="base"
+            borderColor="base"
+            borderRadius="base"
+          >
+            <s-clickable onClick={() => setCurrentFilter("pickedToday")}>
+              <s-stack gap="small">
+                <s-text color="subdued">Items Cut Log</s-text>
+                <s-text type="strong">{stats.itemsCutLog}</s-text>
+              </s-stack>
+            </s-clickable>
+          </s-box>
+
+          <s-box
+            padding="base"
             background="base"
             borderWidth="base"
             borderColor="base"
@@ -1204,7 +1241,7 @@ export default function CutListPage() {
                 <s-table-cell>
                   <s-text color="subdued">
                     {currentFilter === "pickedToday"
-                      ? "No previously cut items"
+                      ? "No cut items in log"
                       : currentFilter === "readyToShip"
                         ? "No orders ready to ship"
                         : "No orders to pick"}
@@ -1225,13 +1262,11 @@ export default function CutListPage() {
                 const alreadyPrinted = item.orderTags.some(
                   (t) => t.toLowerCase() === "printed",
                 );
-                const isOrderFullyPicked = item.orderTags.some(
-                  (t) => t.toLowerCase() === "picked",
-                );
-                const isAlreadyCut =
-                  isOrderFullyPicked || pickedItems.has(item.lineItemId);
                 const isFinalCut =
                   (remainingByOrder.get(item.orderId) || 0) === 1 &&
+                  !pickedItems.has(item.lineItemId);
+                const isInProgress =
+                  readyToPrint.has(item.lineItemId) &&
                   !pickedItems.has(item.lineItemId);
 
                 const prevItem = filteredItems[index - 1];
@@ -1269,36 +1304,39 @@ const multipleGroupBackground =
       : "base"
     : currentFilter === "readyToShip"
       ? orderGroupIndex % 2 === 0
-        ? "subdued"
+        ? "strong"
         : "base"
       : "transparent";
+
+const showOrderGroupBorder =
+  currentFilter === "readyToShip" &&
+  index > 0 &&
+  filteredItems[index - 1]?.orderId !== item.orderId;
+
+const cellStyle = {
+  background: isActive ? "strong" : multipleGroupBackground,
+  borderTop: showOrderGroupBorder ? "4px solid #1f1f1f" : undefined,
+};
 
                 return (
                   <s-table-row
   key={itemKey}
-  style={{
-    background: isActive ? "strong" : multipleGroupBackground,
-  }}
+  style={cellStyle}
 >
 <s-table-cell
-  style={{
-    background: isActive ? "strong" : multipleGroupBackground,
-  }}
+  style={cellStyle}
 >
                       {isActive && <s-badge tone="success">✓</s-badge>}
                     </s-table-cell>
 
                     <s-table-cell
-  style={{
-    background: isActive ? "strong" : multipleGroupBackground,
-  }}
+  style={cellStyle}
 >
                       <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
                       <s-stack gap="small" direction="inline">
   {isRush && <s-badge tone="critical">RUSH</s-badge>}
   {isMultipleOrders && <s-badge tone="info">MULTIPLE ORDERS</s-badge>}
   {item.hasHold && <s-badge tone="critical">FULFILLMENT HOLD</s-badge>}
-  {isAlreadyCut && <s-badge tone="warning">ALREADY CUT</s-badge>}
   {isFinalCut && (
     <span
       style={{
@@ -1317,6 +1355,7 @@ const multipleGroupBackground =
       FINAL CUT
     </span>
   )}
+  {isInProgress && <s-badge tone="warning">IN PROGRESS</s-badge>}
   {item.orderNote && <s-badge tone="caution">📝 NOTE</s-badge>}
   <s-link href={`shopify://admin/orders/${orderIdNum}`}>
     {item.orderName}
@@ -1326,9 +1365,7 @@ const multipleGroupBackground =
                     </s-table-cell>
 
                     <s-table-cell
-  style={{
-    background: isActive ? "strong" : multipleGroupBackground,
-  }}
+  style={cellStyle}
 >
 <s-box
   padding="small"
@@ -1352,9 +1389,7 @@ const multipleGroupBackground =
                     </s-table-cell>
 
                     <s-table-cell
-  style={{
-    background: isActive ? "strong" : multipleGroupBackground,
-  }}
+  style={cellStyle}
 >
                       <s-box
                         padding="small"
@@ -1379,9 +1414,7 @@ const multipleGroupBackground =
                     </s-table-cell>
 
                     <s-table-cell
-  style={{
-    background: isActive ? "strong" : multipleGroupBackground,
-  }}
+  style={cellStyle}
 >
                       <s-box
                         padding="small"
@@ -1395,9 +1428,7 @@ const multipleGroupBackground =
                     </s-table-cell>
 
                     <s-table-cell
-  style={{
-    background: isActive ? "strong" : multipleGroupBackground,
-  }}
+  style={cellStyle}
 >
                       <s-box
                         padding="small"
@@ -1416,9 +1447,7 @@ const multipleGroupBackground =
                     </s-table-cell>
 
                     <s-table-cell
-  style={{
-    background: isActive ? "strong" : multipleGroupBackground,
-  }}
+  style={cellStyle}
 >
                       {item.productImage ? (
                         <s-clickable
@@ -1429,10 +1458,16 @@ const multipleGroupBackground =
                             })
                           }
                         >
-                          <s-thumbnail
+                          <img
                             src={item.productImage}
                             alt={item.productImageAlt || item.productTitle}
-                            size="small-200"
+                            style={{
+                              width: "150px",
+                              height: "150px",
+                              objectFit: "cover",
+                              borderRadius: "8px",
+                              display: "block",
+                            }}
                           />
                         </s-clickable>
                       ) : (
@@ -1441,9 +1476,7 @@ const multipleGroupBackground =
                     </s-table-cell>
 
                     <s-table-cell
-  style={{
-    background: isActive ? "strong" : multipleGroupBackground,
-  }}
+  style={cellStyle}
 >
                       <s-box
                         padding="small"
@@ -1459,9 +1492,7 @@ const multipleGroupBackground =
                     </s-table-cell>
 
                     <s-table-cell
-  style={{
-    background: isActive ? "strong" : multipleGroupBackground,
-  }}
+  style={cellStyle}
 >
                       <s-box
                         padding="small"
@@ -1480,9 +1511,7 @@ const multipleGroupBackground =
                     </s-table-cell>
 
                     <s-table-cell
-  style={{
-    background: isActive ? "strong" : multipleGroupBackground,
-  }}
+  style={cellStyle}
 >
                       <s-box
                         padding="small"
@@ -1496,9 +1525,7 @@ const multipleGroupBackground =
                     </s-table-cell>
 
                     <s-table-cell
-  style={{
-    background: isActive ? "strong" : multipleGroupBackground,
-  }}
+  style={cellStyle}
 >
                       <s-button variant="tertiary" onClick={() => handleProductCountClick(item)}>
                         {item.allLineItems.filter((li) => li.sku !== VIRTUAL_SKU).length} items
@@ -1506,13 +1533,27 @@ const multipleGroupBackground =
                     </s-table-cell>
 
                     <s-table-cell
-  style={{
-    background: isActive ? "strong" : multipleGroupBackground,
-  }}
+  style={cellStyle}
 >
                       {currentFilter === "pickedToday" ||
                       currentFilter === "readyToShip" ? (
-                        <s-text>{getPickedByName(item.orderTags)}</s-text>
+                        <s-stack gap="small">
+                          <s-text>{getPickedByName(item.orderTags)}</s-text>
+                          <div style={{ textAlign: "center" }}>
+                            <s-stack gap="small">
+                              <s-clickable
+                                onClick={() => reprintLabel(item, "bin")}
+                              >
+                                <s-badge>Reprint Bin Label</s-badge>
+                              </s-clickable>
+                              <s-clickable
+                                onClick={() => reprintLabel(item, "cut")}
+                              >
+                                <s-badge>Reprint Product Label</s-badge>
+                              </s-clickable>
+                            </s-stack>
+                          </div>
+                        </s-stack>
                       ) : printedLines.has(item.lineItemId) ? (
                         <s-stack gap="small">
                           <s-badge tone="success">✓ Label sent to printer</s-badge>
@@ -1523,12 +1564,34 @@ const multipleGroupBackground =
                       ) : readyToPrint.has(item.lineItemId) ? (
                         <s-stack gap="small">
                           <s-badge tone="success">✓ Scan verified</s-badge>
-                          <s-button
-                            variant="primary"
-                            onClick={() => openPrint(item, !alreadyPrinted)}
-                          >
-                            Print Labels
-                          </s-button>
+                          {item.productType?.toLowerCase() === "roll end" ? (
+                            alreadyPrinted ? (
+                              <s-button
+                                variant="primary"
+                                onClick={() =>
+                                  openPrint(item, false, { skipWindow: true })
+                                }
+                              >
+                                Mark Already Printed
+                              </s-button>
+                            ) : (
+                              <s-button
+                                variant="primary"
+                                onClick={() =>
+                                  openPrint(item, true, { skipCut: true })
+                                }
+                              >
+                                Print Bin Label
+                              </s-button>
+                            )
+                          ) : (
+                            <s-button
+                              variant="primary"
+                              onClick={() => openPrint(item, !alreadyPrinted)}
+                            >
+                              {alreadyPrinted ? "Print Product Label" : "Print Labels"}
+                            </s-button>
+                          )}
                         </s-stack>
                       ) : isActive ? (
                         <s-stack gap="small">
@@ -1566,15 +1629,11 @@ const multipleGroupBackground =
                     </s-table-cell>
 
                     <s-table-cell
-  style={{
-    background: isActive ? "strong" : multipleGroupBackground,
-  }}
+  style={cellStyle}
 >
                       <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
                       <s-table-cell
-  style={{
-    background: isActive ? "strong" : multipleGroupBackground,
-  }}
+  style={cellStyle}
 >
 <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
     {item.orderTags.length > 0 ? (
@@ -1592,9 +1651,7 @@ const multipleGroupBackground =
                     </s-table-cell>
 
                     <s-table-cell
-  style={{
-    background: isActive ? "strong" : multipleGroupBackground,
-  }}
+  style={cellStyle}
 >
                       {isActive && <s-badge tone="success">✓</s-badge>}
                     </s-table-cell>

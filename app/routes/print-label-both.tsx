@@ -12,6 +12,7 @@ type PrintData = {
   sku: string;
   barcode: string | null;
   includeBin: boolean;
+  includeCut: boolean;
 };
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -24,6 +25,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const sku = url.searchParams.get("sku") || "TEST-SKU";
   const barcode = url.searchParams.get("barcode") || "";
   const includeBin = url.searchParams.get("includeBin") !== "false";
+  const includeCut = url.searchParams.get("includeCut") !== "false";
 
   return {
     orderName,
@@ -35,6 +37,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     sku,
     barcode: barcode || null,
     includeBin,
+    includeCut,
   };
 };
 
@@ -44,6 +47,13 @@ function escapeHtml(value: string) {
     .replace(/"/g, "&quot;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
+function getQtyDisplay(quantity: number, variantTitle: string | null) {
+  if (variantTitle?.includes("By the Yard")) {
+    return `${quantity} units / ${(quantity / 4).toFixed(2)}`;
+  }
+  return `${quantity} units`;
 }
 
 function generateBinLabelHtml(orderName: string): string {
@@ -68,8 +78,10 @@ function generateBinLabelHtml(orderName: string): string {
 
 function generateCutLabelHtml(data: PrintData): string {
   const safeTitle = escapeHtml(data.productTitle);
+  const safeVariant = escapeHtml(data.variantTitle || "");
   const safeSku = escapeHtml(data.sku || "");
   const safeOrderName = escapeHtml(data.orderName);
+  const qtyDisplay = escapeHtml(getQtyDisplay(data.quantity, data.variantTitle));
   const barcode = data.barcode ? escapeHtml(data.barcode) : "";
 
   return `
@@ -78,7 +90,10 @@ function generateCutLabelHtml(data: PrintData): string {
         <div class="product-title">${safeTitle}</div>
 
         <div class="meta-line">
+          ${safeVariant ? `<span>${safeVariant}</span><span class="divider">|</span>` : ""}
           <span>${safeOrderName}</span>
+          <span class="divider">|</span>
+          <span>${qtyDisplay}</span>
         </div>
 
         ${
@@ -154,7 +169,7 @@ export default function PrintLabelBothPage() {
 
   const html = `
     ${data.includeBin ? generateBinLabelHtml(data.orderName) : ""}
-    ${generateCutLabelHtml(data)}
+    ${data.includeCut ? generateCutLabelHtml(data) : ""}
   `;
 
   return (
@@ -231,10 +246,10 @@ export default function PrintLabelBothPage() {
           }
 
           .bin-order {
-            font-size: 9pt;
+            font-size: 11pt;
             font-weight: 900;
-            line-height: 1.1;
-            margin-bottom: 1mm;
+            line-height: 1.05;
+            margin-bottom: 1.2mm;
             letter-spacing: 0.2px;
           }
 
@@ -244,7 +259,7 @@ export default function PrintLabelBothPage() {
           }
 
           .product-title {
-            font-size: 7.8pt;
+            font-size: 7pt;
             font-weight: 900;
             line-height: 1.08;
             white-space: nowrap;
@@ -258,13 +273,14 @@ export default function PrintLabelBothPage() {
             flex-wrap: nowrap;
             align-items: center;
             gap: 0.7mm;
-            font-size: 6.2pt;
-            font-weight: 700;
+            font-size: 5.5pt;
+            font-weight: 600;
             line-height: 1.1;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
             margin-bottom: 0.8mm;
+            color: #555 !important;
           }
 
           .divider {
@@ -288,14 +304,15 @@ export default function PrintLabelBothPage() {
           }
 
           .sku-line {
-            text-align: center;
-            font-size: 8pt;
-            font-weight: 900;
+            text-align: left;
+            font-size: 5.5pt;
+            font-weight: 600;
             line-height: 1.05;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
             margin-top: 0.3mm;
+            color: #555 !important;
           }
 
           .no-barcode {
