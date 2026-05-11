@@ -92,6 +92,7 @@ type CutListItem = {
   variantId: string;
   barcode: string | null;
   binNumber: string;
+  fabricLength: string | null;
   hasHold: boolean;
   allLineItems: LineItem[];
   productImage: string | null;
@@ -135,6 +136,10 @@ function toCutListItems(
         lineItem.variant?.metafields?.edges.find(
           (e) => e.node.key === "bin_number",
         )?.node.value || "";
+      const fabricLength =
+        lineItem.variant?.metafields?.edges.find(
+          (e) => e.node.key === "fabric_length",
+        )?.node.value || null;
 
         if (!lineItem.title) continue;
         if (!lineItem.id) continue;
@@ -161,6 +166,7 @@ function toCutListItems(
         productImage: lineItem.product?.featuredImage?.url || null,
         productImageAlt: lineItem.product?.featuredImage?.altText || null,
         productType: lineItem.product?.productType || null,
+        fabricLength,
       });
     }
   }
@@ -255,7 +261,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   const mainOrdersResult = await queryOrders(
     admin,
-    `(fulfillment_status:unfulfilled OR fulfillment_status:on_hold) -status:cancelled -tag:picked -tag:'picked by EasyScan'`,
+    `(fulfillment_status:unfulfilled OR fulfillment_status:on_hold OR fulfillment_status:partial) -status:cancelled -tag:picked -tag:'picked by EasyScan'`,
   );
 
   const pickedTodayResult = await queryOrders(
@@ -384,6 +390,7 @@ export default function CutListPage() {
     | "rush"
     | "rollEnds"
     | "swatches"
+    | "totalSwatches"
     | "pickedToday"
     | "multiple"
     | "hold"
@@ -441,6 +448,12 @@ export default function CutListPage() {
     note: string;
   } | null>(null);
   const [acknowledgedNotes, setAcknowledgedNotes] = useState<Set<string>>(new Set());
+  const [readyToShipModalOrderId, setReadyToShipModalOrderId] = useState<
+    string | null
+  >(null);
+  const [readyToShipSelections, setReadyToShipSelections] = useState<Set<string>>(
+    new Set(),
+  );
 
   useEffect(() => {
     if (tagFetcher.state === "idle" && tagFetcher.data?.ok) {
@@ -657,6 +670,20 @@ export default function CutListPage() {
     return orderTags.some((tag) => tag.toLowerCase() === "rush");
   }
 
+  function hasReadyToShipTag(item: CutListItem): boolean {
+    const numericId = item.lineItemId.split("/").pop();
+    if (!numericId) return false;
+    const tag = `ready-to-ship:${numericId}`.toLowerCase();
+    return item.orderTags.some((t) => t.toLowerCase() === tag);
+  }
+
+  function isSwatch(item: CutListItem): boolean {
+    if (item.variantTitle?.toLowerCase().includes("swatch sample")) return true;
+    if (item.sku.toLowerCase().includes("swatch")) return true;
+    if (item.fabricLength?.toLowerCase().includes("swatch sample")) return true;
+    return false;
+  }
+
   function isItemCut(item: CutListItem): boolean {
     const isOrderFullyPicked = item.orderTags.some(
       (t) => t.toLowerCase() === "picked",
@@ -682,9 +709,15 @@ export default function CutListPage() {
     return employeeName;
   };
 
+  const cutListItemsVisible = cutListItems.filter(
+    (item) => !hasReadyToShipTag(item),
+  );
+
   const getFilteredItems = (): CutListItem[] => {
     if (currentFilter === "pickedToday") {
-      return pickedTodayItems.filter(isItemCut);
+      return pickedTodayItems.filter(
+        (item) => isItemCut(item) && item.quantity > 0,
+      );
     }
 
     if (currentFilter === "rush") {
@@ -692,7 +725,7 @@ export default function CutListPage() {
     }
 
     if (currentFilter === "multiple") {
-      const multipleItems = cutListItems.filter((item) =>
+      const multipleItems = cutListItemsVisible.filter((item) =>
         item.orderTags.some((t) => t.toLowerCase() === "multiple orders"),
       );
 
@@ -706,8 +739,10 @@ export default function CutListPage() {
     if (currentFilter === "readyToShip") {
       const readyItems = pickedTodayItems.filter(
         (item) =>
-          item.orderTags.some((t) => t.toLowerCase() === "picked") &&
-          !item.hasHold,
+          (item.orderTags.some((t) => t.toLowerCase() === "picked") ||
+            hasReadyToShipTag(item)) &&
+          !item.hasHold &&
+          item.quantity > 0,
       );
       const orderGroups = new Map<string, CutListItem[]>();
       for (const item of readyItems) {
@@ -724,7 +759,7 @@ export default function CutListPage() {
       return sortedGroups.flat();
     }
 
-    const allItems = applyRushFirstSort(cutListItems);
+    const allItems = applyRushFirstSort(cutListItemsVisible);
 
     if (currentFilter === "rollEnds") {
       const rollEndOrders = new Set<string>();
@@ -761,15 +796,17 @@ export default function CutListPage() {
       });
 
       orderMap.forEach((items, orderId) => {
-        const allAreSwatches = items.every((item) =>
-          item.variantTitle?.includes("Swatch Sample"),
-        );
+        const allAreSwatches = items.every((item) => isSwatch(item));
         if (allAreSwatches) {
           swatchOrders.add(orderId);
         }
       });
 
       return allItems.filter((item) => swatchOrders.has(item.orderId));
+    }
+
+    if (currentFilter === "totalSwatches") {
+      return allItems.filter((item) => isSwatch(item));
     }
 
     if (currentFilter === "multiple") {
@@ -785,7 +822,7 @@ export default function CutListPage() {
 
   const getSummaryStats = () => {
     const filteredCutListItems = cutListItems.filter(
-      (item) => item.sku !== VIRTUAL_SKU,
+      (item) => item.sku !== VIRTUAL_SKU && !hasReadyToShipTag(item),
     );
     const uniqueOrders = new Set(filteredCutListItems.map((i) => i.orderId));
     const totalCuts = filteredCutListItems.length;
@@ -814,7 +851,8 @@ export default function CutListPage() {
     });
 
     const cutLogItems = pickedTodayItems.filter(
-      (item) => item.sku !== VIRTUAL_SKU && isItemCut(item),
+      (item) =>
+        item.sku !== VIRTUAL_SKU && isItemCut(item) && item.quantity > 0,
     );
     const uniqueCutLogOrders = new Set(
       cutLogItems.map((item) => item.orderId),
@@ -822,14 +860,21 @@ export default function CutListPage() {
 
     const readyToShipOrders = new Set(
       pickedTodayItems
-        .filter(
-          (item) =>
-            item.sku !== VIRTUAL_SKU &&
-            item.orderTags.some((t) => t.toLowerCase() === "picked") &&
-            !item.hasHold,
-        )
+        .filter((item) => {
+          if (item.sku === VIRTUAL_SKU) return false;
+          if (item.hasHold) return false;
+          if (item.quantity === 0) return false;
+          const orderFullyPicked = item.orderTags.some(
+            (t) => t.toLowerCase() === "picked",
+          );
+          return orderFullyPicked || hasReadyToShipTag(item);
+        })
         .map((item) => item.orderId),
     );
+
+    const totalSwatchesCount = filteredCutListItems.filter((item) =>
+      isSwatch(item),
+    ).length;
 
     return {
       rushOrders: rushOrders.length,
@@ -839,6 +884,7 @@ export default function CutListPage() {
       totalCuts,
       rollEndsOnly: rollEndsOnlyCount,
       swatchesOnly: swatchesOnlyCount,
+      totalSwatches: totalSwatchesCount,
       readyToShip: readyToShipOrders.size,
     };
   };
@@ -1003,6 +1049,209 @@ export default function CutListPage() {
     window.open(`/print-label-both?${params.toString()}`, "_blank");
   };
 
+  const openReadyToShipModal = (orderId: string) => {
+    setReadyToShipModalOrderId(orderId);
+    setReadyToShipSelections(new Set());
+  };
+
+  const toggleReadyToShipSelection = (lineItemId: string) => {
+    setReadyToShipSelections((prev) => {
+      const next = new Set(prev);
+      if (next.has(lineItemId)) next.delete(lineItemId);
+      else next.add(lineItemId);
+      return next;
+    });
+  };
+
+  const confirmReadyToShip = () => {
+    if (!readyToShipModalOrderId) return;
+    const selectedIds = Array.from(readyToShipSelections);
+    if (selectedIds.length === 0) {
+      setReadyToShipModalOrderId(null);
+      return;
+    }
+
+    const newTags = selectedIds.map((id) => {
+      const numericId = id.split("/").pop() || id;
+      return `ready-to-ship:${numericId}`;
+    });
+
+    submitTagsAdd(readyToShipModalOrderId, newTags);
+
+    setCutListItems((prev) =>
+      prev.map((i) =>
+        i.orderId === readyToShipModalOrderId
+          ? {
+              ...i,
+              orderTags: Array.from(new Set([...i.orderTags, ...newTags])),
+            }
+          : i,
+      ),
+    );
+
+    setPickedTodayItems((prev) =>
+      prev.map((i) =>
+        i.orderId === readyToShipModalOrderId
+          ? {
+              ...i,
+              orderTags: Array.from(new Set([...i.orderTags, ...newTags])),
+            }
+          : i,
+      ),
+    );
+
+    setReadyToShipModalOrderId(null);
+    setReadyToShipSelections(new Set());
+  };
+
+  const reprintSwatchBundle = (swatches: CutListItem[]) => {
+    if (swatches.length === 0) return;
+    const orderName = swatches[0].orderName;
+    const itemsParam = encodeURIComponent(
+      JSON.stringify(
+        swatches.map((s) => ({
+          productTitle: s.productTitle,
+          variantTitle: s.variantTitle,
+          quantity: s.quantity,
+          sku: s.sku,
+          barcode: s.barcode,
+        })),
+      ),
+    );
+    window.open(
+      `/print-label-both?orderName=${encodeURIComponent(orderName)}&items=${itemsParam}&includeBin=false&includeCut=true`,
+      "_blank",
+    );
+  };
+
+  const printSwatchBundle = (swatches: CutListItem[]) => {
+    if (swatches.length === 0) return;
+    const first = swatches[0];
+    const orderId = first.orderId;
+    const orderName = first.orderName;
+
+    const itemsParam = encodeURIComponent(
+      JSON.stringify(
+        swatches.map((s) => ({
+          productTitle: s.productTitle,
+          variantTitle: s.variantTitle,
+          quantity: s.quantity,
+          sku: s.sku,
+          barcode: s.barcode,
+        })),
+      ),
+    );
+
+    const orderHadPrintedTag = first.orderTags.some(
+      (t) => t.toLowerCase() === "printed",
+    );
+    const includeBin = !orderHadPrintedTag;
+
+    const url = `/print-label-both?orderName=${encodeURIComponent(orderName)}&items=${itemsParam}&includeBin=${includeBin}&includeCut=true`;
+
+    const orderItemsInList = cutListItems.filter((i) => i.orderId === orderId);
+    const swatchIds = new Set(swatches.map((s) => s.lineItemId));
+    const pickedAfter = new Set(pickedItems);
+    swatches.forEach((s) => pickedAfter.add(s.lineItemId));
+    const pickedCount = orderItemsInList.filter((i) =>
+      pickedAfter.has(i.lineItemId),
+    ).length;
+    const totalCount = orderItemsInList.filter(
+      (i) => i.sku !== VIRTUAL_SKU,
+    ).length;
+    const timestamp = new Date().toISOString();
+    const swatchLineTags = swatches.map((s) => {
+      const numericId = s.lineItemId.split("/").pop() || s.lineItemId;
+      return `picked-line:${numericId}`;
+    });
+    const printedTag = includeBin ? ["printed"] : [];
+    const hadPartialTag = first.orderTags.some(
+      (t) => t.toLowerCase() === "partially picked",
+    );
+
+    if (pickedCount === totalCount) {
+      const tagsToAdd = ["picked", timestamp, ...swatchLineTags, ...printedTag];
+      submitTagsRemove(orderId, ["partially picked"]);
+      submitTagsAdd(orderId, tagsToAdd);
+      setCutListItems((prev) =>
+        prev.map((i) =>
+          i.orderId === orderId
+            ? {
+                ...i,
+                orderTags: Array.from(
+                  new Set([
+                    ...i.orderTags.filter((tag) => tag !== "partially picked"),
+                    ...tagsToAdd,
+                  ]),
+                ),
+              }
+            : i,
+        ),
+      );
+      setCompletionMessage(
+        `Order ${orderName} is complete. All items cut.`,
+      );
+    } else if (!hadPartialTag) {
+      const tagsToAdd = [
+        "partially picked",
+        timestamp,
+        ...swatchLineTags,
+        ...printedTag,
+      ];
+      submitTagsAdd(orderId, tagsToAdd);
+      setCutListItems((prev) =>
+        prev.map((i) =>
+          i.orderId === orderId
+            ? {
+                ...i,
+                orderTags: Array.from(new Set([...i.orderTags, ...tagsToAdd])),
+              }
+            : i,
+        ),
+      );
+    } else {
+      const tagsToAdd = [...swatchLineTags, ...printedTag];
+      submitTagsAdd(orderId, tagsToAdd);
+      setCutListItems((prev) =>
+        prev.map((i) =>
+          i.orderId === orderId
+            ? {
+                ...i,
+                orderTags: Array.from(new Set([...i.orderTags, ...tagsToAdd])),
+              }
+            : i,
+        ),
+      );
+    }
+
+    setPickedItems((prev) => {
+      const next = new Set(prev);
+      swatches.forEach((s) => next.add(s.lineItemId));
+      return next;
+    });
+    setPrintedLines((prev) => {
+      const next = new Set(prev);
+      swatches.forEach((s) => next.add(s.lineItemId));
+      return next;
+    });
+    setReadyToPrint((prev) => {
+      const next = new Set(prev);
+      swatches.forEach((s) => next.delete(s.lineItemId));
+      return next;
+    });
+
+    window.open(url, "_blank");
+
+    const itemsNow = getFilteredItems();
+    const lastSwatchIdx = itemsNow.reduce<number>((maxIdx, it, idx) => {
+      return swatchIds.has(it.lineItemId) ? Math.max(maxIdx, idx) : maxIdx;
+    }, -1);
+    const nextItem = itemsNow[lastSwatchIdx + 1];
+    if (nextItem) {
+      setActiveLineId(nextItem.lineItemId);
+    }
+  };
+
   const stats = getSummaryStats();
   const filteredItems = getFilteredItems();
 
@@ -1093,6 +1342,21 @@ export default function CutListPage() {
               <s-stack gap="small">
                 <s-text color="subdued">Swatches Only</s-text>
                 <s-text type="strong">{stats.swatchesOnly}</s-text>
+              </s-stack>
+            </s-clickable>
+          </s-box>
+
+          <s-box
+            padding="base"
+            background={currentFilter === "totalSwatches" ? "subdued" : "base"}
+            borderWidth="base"
+            borderColor="base"
+            borderRadius="base"
+          >
+            <s-clickable onClick={() => setCurrentFilter("totalSwatches")}>
+              <s-stack gap="small">
+                <s-text color="subdued">Total Swatches to Pick</s-text>
+                <s-text type="strong">{stats.totalSwatches}</s-text>
               </s-stack>
             </s-clickable>
           </s-box>
@@ -1250,6 +1514,22 @@ export default function CutListPage() {
               </s-table-row>
             ) : (
               filteredItems.map((item, index) => {
+                const isSwatchItem = isSwatch(item);
+                const firstSwatchIdxForOrder = isSwatchItem
+                  ? filteredItems.findIndex(
+                      (i) => i.orderId === item.orderId && isSwatch(i),
+                    )
+                  : -1;
+                if (isSwatchItem && firstSwatchIdxForOrder !== index) {
+                  return null;
+                }
+                const swatchesForOrder = isSwatchItem
+                  ? filteredItems.filter(
+                      (i) => i.orderId === item.orderId && isSwatch(i),
+                    )
+                  : [];
+                const isBundleRow = isSwatchItem && swatchesForOrder.length > 0;
+
                 const itemKey = `${item.lineItemId}`;
                 const orderIdNum = item.orderId.split("/").pop();
                 const customerIdNum = item.customerId?.split("/").pop();
@@ -1436,12 +1716,19 @@ const cellStyle = {
                         borderRadius="small"
                       >
                         <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
-                          <s-stack gap="small" direction="inline">
-                            <s-link href={`shopify://admin/products/${productIdNum}`}>
-                              {item.sku || "-"}
-                            </s-link>
-                            {getVariantTypeBadge(item.variantTitle)}
-                          </s-stack>
+                          {isBundleRow ? (
+                            <s-stack gap="small" direction="inline">
+                              <s-text>{swatchesForOrder.length} swatches</s-text>
+                              <s-badge tone="warning">Swatch Bundle</s-badge>
+                            </s-stack>
+                          ) : (
+                            <s-stack gap="small" direction="inline">
+                              <s-link href={`shopify://admin/products/${productIdNum}`}>
+                                {item.sku || "-"}
+                              </s-link>
+                              {getVariantTypeBadge(item.variantTitle)}
+                            </s-stack>
+                          )}
                         </s-clickable>
                       </s-box>
                     </s-table-cell>
@@ -1484,9 +1771,17 @@ const cellStyle = {
                         borderRadius="small"
                       >
                         <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
-                          <s-link href={`shopify://admin/products/${productIdNum}`}>
-                            {item.productTitle}
-                          </s-link>
+                          {isBundleRow ? (
+                            <s-text>
+                              {swatchesForOrder
+                                .map((s) => s.productTitle)
+                                .join(", ")}
+                            </s-text>
+                          ) : (
+                            <s-link href={`shopify://admin/products/${productIdNum}`}>
+                              {item.productTitle}
+                            </s-link>
+                          )}
                         </s-clickable>
                       </s-box>
                     </s-table-cell>
@@ -1500,7 +1795,9 @@ const cellStyle = {
                         borderRadius="small"
                       >
                         <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
-                          {!item.variantTitle?.includes("By the Yard") &&
+                          {isBundleRow ? (
+                            <s-text>{swatchesForOrder.length} swatches</s-text>
+                          ) : !item.variantTitle?.includes("By the Yard") &&
                           item.quantity > 1 ? (
                             <s-badge tone="critical">⚠️ {item.quantity} units</s-badge>
                           ) : (
@@ -1547,7 +1844,11 @@ const cellStyle = {
                                 <s-badge>Reprint Bin Label</s-badge>
                               </s-clickable>
                               <s-clickable
-                                onClick={() => reprintLabel(item, "cut")}
+                                onClick={() =>
+                                  isBundleRow
+                                    ? reprintSwatchBundle(swatchesForOrder)
+                                    : reprintLabel(item, "cut")
+                                }
                               >
                                 <s-badge>Reprint Product Label</s-badge>
                               </s-clickable>
@@ -1557,10 +1858,39 @@ const cellStyle = {
                       ) : printedLines.has(item.lineItemId) ? (
                         <s-stack gap="small">
                           <s-badge tone="success">✓ Label sent to printer</s-badge>
-                          <s-button variant="tertiary" onClick={() => openPrint(item, true)}>
+                          <s-button
+                            variant="tertiary"
+                            onClick={() =>
+                              isBundleRow
+                                ? reprintSwatchBundle(swatchesForOrder)
+                                : openPrint(item, true)
+                            }
+                          >
                             Reprint
                           </s-button>
+                          <s-button
+                            variant="tertiary"
+                            onClick={() => openReadyToShipModal(item.orderId)}
+                          >
+                            Ready to Ship
+                          </s-button>
                         </s-stack>
+                      ) : isBundleRow ? (
+                        isActive ? (
+                          <s-stack gap="small">
+                            <s-badge tone="success">✓ Active</s-badge>
+                            <s-button
+                              variant="primary"
+                              onClick={() => printSwatchBundle(swatchesForOrder)}
+                            >
+                              Print Swatch Labels
+                            </s-button>
+                          </s-stack>
+                        ) : (
+                          <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
+                            <s-text color="subdued">Click to activate</s-text>
+                          </s-clickable>
+                        )
                       ) : readyToPrint.has(item.lineItemId) ? (
                         <s-stack gap="small">
                           <s-badge tone="success">✓ Scan verified</s-badge>
@@ -1695,6 +2025,68 @@ const cellStyle = {
           onClick={() => setShowProductCountModal(false)}
         >
           Close
+        </s-button>
+      </s-modal>
+
+      <s-modal
+        id="ready-to-ship-modal"
+        heading="Mark items as Ready to Ship"
+        ref={(el) => {
+          if (el && readyToShipModalOrderId) {
+            el.showOverlay();
+          } else if (el && !readyToShipModalOrderId) {
+            el.hideOverlay();
+          }
+        }}
+        onHide={() => setReadyToShipModalOrderId(null)}
+      >
+        <s-box padding="base">
+          <s-stack gap="small">
+            {readyToShipModalOrderId
+              ? cutListItems
+                  .filter(
+                    (i) =>
+                      i.orderId === readyToShipModalOrderId &&
+                      i.sku !== VIRTUAL_SKU,
+                  )
+                  .map((i) => {
+                    const isPrinted = pickedItems.has(i.lineItemId);
+                    const isSelected = readyToShipSelections.has(i.lineItemId);
+                    return (
+                      <s-clickable
+                        key={i.lineItemId}
+                        onClick={() =>
+                          isPrinted && toggleReadyToShipSelection(i.lineItemId)
+                        }
+                      >
+                        <s-stack gap="small" direction="inline">
+                          <s-text type={isSelected ? "strong" : undefined}>
+                            {isPrinted ? (isSelected ? "☑" : "☐") : "·"}
+                          </s-text>
+                          <s-text color={isPrinted ? "base" : "subdued"}>
+                            {i.productTitle}
+                            {i.variantTitle ? ` — ${i.variantTitle}` : ""}
+                            {!isPrinted && " (not yet cut)"}
+                          </s-text>
+                        </s-stack>
+                      </s-clickable>
+                    );
+                  })
+              : null}
+          </s-stack>
+        </s-box>
+        <s-button
+          slot="primary-action"
+          variant="primary"
+          onClick={confirmReadyToShip}
+        >
+          Confirm
+        </s-button>
+        <s-button
+          slot="secondary-actions"
+          onClick={() => setReadyToShipModalOrderId(null)}
+        >
+          Cancel
         </s-button>
       </s-modal>
 

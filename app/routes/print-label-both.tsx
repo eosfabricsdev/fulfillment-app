@@ -2,42 +2,46 @@ import { useEffect } from "react";
 import type { LoaderFunctionArgs } from "react-router";
 import { useLoaderData } from "react-router";
 
-type PrintData = {
-  orderName: string;
-  orderTags: string[];
-  lineItemId: string;
+type LabelItem = {
   productTitle: string;
   variantTitle: string | null;
   quantity: number;
   sku: string;
   barcode: string | null;
-  includeBin: boolean;
-  includeCut: boolean;
 };
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
 
   const orderName = url.searchParams.get("orderName") || "TEST ORDER";
-  const productTitle = url.searchParams.get("productTitle") || "TEST PRODUCT";
-  const variantTitle = url.searchParams.get("variantTitle") || null;
-  const quantity = Number(url.searchParams.get("quantity") || "1");
-  const sku = url.searchParams.get("sku") || "TEST-SKU";
-  const barcode = url.searchParams.get("barcode") || "";
   const includeBin = url.searchParams.get("includeBin") !== "false";
   const includeCut = url.searchParams.get("includeCut") !== "false";
 
+  const itemsParam = url.searchParams.get("items");
+  let items: LabelItem[];
+  if (itemsParam) {
+    try {
+      items = JSON.parse(decodeURIComponent(itemsParam));
+    } catch {
+      items = [];
+    }
+  } else {
+    items = [
+      {
+        productTitle: url.searchParams.get("productTitle") || "TEST PRODUCT",
+        variantTitle: url.searchParams.get("variantTitle") || null,
+        quantity: Number(url.searchParams.get("quantity") || "1"),
+        sku: url.searchParams.get("sku") || "TEST-SKU",
+        barcode: url.searchParams.get("barcode") || null,
+      },
+    ];
+  }
+
   return {
     orderName,
-    orderTags: [],
-    lineItemId: "test",
-    productTitle,
-    variantTitle,
-    quantity,
-    sku,
-    barcode: barcode || null,
     includeBin,
     includeCut,
+    items,
   };
 };
 
@@ -51,7 +55,7 @@ function escapeHtml(value: string) {
 
 function getQtyDisplay(quantity: number, variantTitle: string | null) {
   if (variantTitle?.includes("By the Yard")) {
-    return `${quantity} units / ${(quantity / 4).toFixed(2)}`;
+    return `Yards: ${(quantity / 4).toFixed(2)}`;
   }
   return `${quantity} units`;
 }
@@ -76,13 +80,13 @@ function generateBinLabelHtml(orderName: string): string {
   `;
 }
 
-function generateCutLabelHtml(data: PrintData): string {
-  const safeTitle = escapeHtml(data.productTitle);
-  const safeVariant = escapeHtml(data.variantTitle || "");
-  const safeSku = escapeHtml(data.sku || "");
-  const safeOrderName = escapeHtml(data.orderName);
-  const qtyDisplay = escapeHtml(getQtyDisplay(data.quantity, data.variantTitle));
-  const barcode = data.barcode ? escapeHtml(data.barcode) : "";
+function generateCutLabelHtml(item: LabelItem, orderName: string): string {
+  const safeTitle = escapeHtml(item.productTitle);
+  const safeVariant = escapeHtml(item.variantTitle || "");
+  const safeSku = escapeHtml(item.sku || "");
+  const safeOrderName = escapeHtml(orderName);
+  const qtyDisplay = escapeHtml(getQtyDisplay(item.quantity, item.variantTitle));
+  const barcode = item.barcode ? escapeHtml(item.barcode) : "";
 
   return `
     <section class="label-page">
@@ -101,9 +105,8 @@ function generateCutLabelHtml(data: PrintData): string {
             ? `
               <div class="barcode-wrap">
                 <svg
-                  id="cut-barcode"
                   data-barcode-value="${barcode}"
-                  class="barcode-svg"
+                  class="barcode-svg cut-barcode"
                 ></svg>
               </div>
             `
@@ -127,7 +130,7 @@ export default function PrintLabelBothPage() {
     script.onload = () => {
       const JsBarcode = (window as any).JsBarcode;
       const bin = document.querySelector("#bin-barcode") as SVGElement | null;
-      const cut = document.querySelector("#cut-barcode") as SVGElement | null;
+      const cuts = document.querySelectorAll(".cut-barcode");
 
       if (bin && JsBarcode) {
         JsBarcode(bin, bin.getAttribute("data-barcode-value"), {
@@ -140,16 +143,17 @@ export default function PrintLabelBothPage() {
         });
       }
 
-      if (cut && JsBarcode) {
+      cuts.forEach((cut) => {
+        if (!JsBarcode) return;
         JsBarcode(cut, cut.getAttribute("data-barcode-value"), {
           format: "CODE128",
           displayValue: false,
           lineColor: "#000000",
-          height: 20,
+          height: 10,
           margin: 0,
           width: 1.4,
         });
-      }
+      });
 
       setTimeout(() => {
         window.print();
@@ -169,7 +173,13 @@ export default function PrintLabelBothPage() {
 
   const html = `
     ${data.includeBin ? generateBinLabelHtml(data.orderName) : ""}
-    ${data.includeCut ? generateCutLabelHtml(data) : ""}
+    ${
+      data.includeCut
+        ? data.items
+            .map((item) => generateCutLabelHtml(item, data.orderName))
+            .join("")
+        : ""
+    }
   `;
 
   return (
@@ -305,7 +315,7 @@ export default function PrintLabelBothPage() {
 
           .sku-line {
             text-align: left;
-            font-size: 5.5pt;
+            font-size: 11pt;
             font-weight: 600;
             line-height: 1.05;
             white-space: nowrap;
