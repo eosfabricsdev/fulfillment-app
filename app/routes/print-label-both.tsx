@@ -283,7 +283,7 @@ export default function PrintLabelBothPage() {
             flex-wrap: nowrap;
             align-items: center;
             gap: 0.7mm;
-            font-size: 5.5pt;
+            font-size: 11pt;
             font-weight: 600;
             line-height: 1.1;
             white-space: nowrap;
@@ -334,24 +334,14 @@ export default function PrintLabelBothPage() {
           }
 
           @media print {
-  html, body {
-  width: 57mm;
-  height: 25mm;
-
-  margin: 0;
-  padding: 0;
-
-  zoom: 1;
-}
-
-  body {
-    margin: 0;
-  }
-
-  .label-page {
-    margin: 0;
-  }
-}
+            html, body {
+              margin: 0;
+              padding: 0;
+            }
+            .label-page {
+              margin: 0;
+            }
+          }
         `}</style>
       </head>
       <body dangerouslySetInnerHTML={{ __html: html }} />
