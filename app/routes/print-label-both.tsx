@@ -283,7 +283,7 @@ export default function PrintLabelBothPage() {
             flex-wrap: nowrap;
             align-items: center;
             gap: 0.7mm;
-            font-size: 11pt;
+            font-size: 8pt;
             font-weight: 600;
             line-height: 1.1;
             white-space: nowrap;
