@@ -653,8 +653,8 @@ export default function CutListPage() {
     if (variantTitle?.includes("By the Yard")) {
       return (
         <s-stack gap="small">
-          <s-text>{quantity} units</s-text>
           <s-text type="strong">{(quantity / 4).toFixed(2)} yds</s-text>
+          <s-text>{quantity} units</s-text>
         </s-stack>
       );
     }
@@ -1032,6 +1032,14 @@ export default function CutListPage() {
     const nextItem = itemsNow[currentIndex + 1];
     if (nextItem) {
       setActiveLineId(nextItem.lineItemId);
+      if (
+        nextItem.sku &&
+        nextItem.sku === item.sku &&
+        nextItem.sku !== VIRTUAL_SKU &&
+        !isSwatch(nextItem)
+      ) {
+        setReadyToPrint((prev) => new Set(prev).add(nextItem.lineItemId));
+      }
     }
   };
 
@@ -1119,7 +1127,7 @@ export default function CutListPage() {
       ),
     );
     window.open(
-      `/print-label-both?orderName=${encodeURIComponent(orderName)}&items=${itemsParam}&includeBin=false&includeCut=true`,
+      `/print-label-both?orderName=${encodeURIComponent(orderName)}&items=${itemsParam}&includeBin=true&includeCut=true`,
       "_blank",
     );
   };
@@ -1145,7 +1153,7 @@ export default function CutListPage() {
     const orderHadPrintedTag = first.orderTags.some(
       (t) => t.toLowerCase() === "printed",
     );
-    const includeBin = !orderHadPrintedTag;
+    const includeBin = true;
 
     const url = `/print-label-both?orderName=${encodeURIComponent(orderName)}&items=${itemsParam}&includeBin=${includeBin}&includeCut=true`;
 
@@ -1164,7 +1172,7 @@ export default function CutListPage() {
       const numericId = s.lineItemId.split("/").pop() || s.lineItemId;
       return `picked-line:${numericId}`;
     });
-    const printedTag = includeBin ? ["printed"] : [];
+    const printedTag = orderHadPrintedTag ? [] : ["printed"];
     const hadPartialTag = first.orderTags.some(
       (t) => t.toLowerCase() === "partially picked",
     );
@@ -1480,14 +1488,14 @@ export default function CutListPage() {
         >
           <s-table-header-row>
             <s-table-header listSlot="labeled"></s-table-header>
-            <s-table-header listSlot="primary">Order Number</s-table-header>
+            <s-table-header listSlot="primary">Product SKU</s-table-header>
+            <s-table-header listSlot="labeled">Quantity</s-table-header>
+            <s-table-header listSlot="labeled">Image</s-table-header>
+            <s-table-header listSlot="labeled">Order Number</s-table-header>
             <s-table-header listSlot="labeled">Customer Name</s-table-header>
             <s-table-header listSlot="labeled">Order Note</s-table-header>
             <s-table-header listSlot="labeled">Bin Number</s-table-header>
-            <s-table-header listSlot="labeled">Product SKU</s-table-header>
-            <s-table-header listSlot="labeled">Image</s-table-header>
             <s-table-header listSlot="labeled">Product Title</s-table-header>
-            <s-table-header listSlot="labeled">Quantity</s-table-header>
             <s-table-header listSlot="labeled">Order Time</s-table-header>
             <s-table-header listSlot="labeled">Product Count</s-table-header>
             <s-table-header listSlot="labeled">
@@ -1612,6 +1620,82 @@ const cellStyle = {
                     <s-table-cell
   style={cellStyle}
 >
+                      <s-box
+                        padding="small"
+                        background={isActive ? "strong" : multipleGroupBackground}
+                        borderRadius="small"
+                      >
+                        <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
+                          {isBundleRow ? (
+                            <s-stack gap="small" direction="inline">
+                              <s-text>{swatchesForOrder.length} swatches</s-text>
+                              <s-badge tone="warning">Swatch Bundle</s-badge>
+                            </s-stack>
+                          ) : (
+                            <s-stack gap="small" direction="inline">
+                              <s-link href={`shopify://admin/products/${productIdNum}`}>
+                                {item.sku || "-"}
+                              </s-link>
+                              {getVariantTypeBadge(item.variantTitle)}
+                            </s-stack>
+                          )}
+                        </s-clickable>
+                      </s-box>
+                    </s-table-cell>
+
+                    <s-table-cell
+  style={cellStyle}
+>
+                      <s-box
+                        padding="small"
+                        background={isActive ? "strong" : multipleGroupBackground}
+                        borderRadius="small"
+                      >
+                        <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
+                          {isBundleRow ? (
+                            <s-text>{swatchesForOrder.length} swatches</s-text>
+                          ) : !item.variantTitle?.includes("By the Yard") &&
+                          item.quantity > 1 ? (
+                            <s-badge tone="critical">⚠️ {item.quantity} units</s-badge>
+                          ) : (
+                            formatQuantity(item.quantity, item.variantTitle)
+                          )}
+                        </s-clickable>
+                      </s-box>
+                    </s-table-cell>
+
+                    <s-table-cell
+  style={cellStyle}
+>
+                      {item.productImage ? (
+                        <s-clickable
+                          onClick={() =>
+                            setPreviewImage({
+                              url: item.productImage!,
+                              alt: item.productImageAlt || item.productTitle,
+                            })
+                          }
+                        >
+                          <img
+                            src={item.productImage}
+                            alt={item.productImageAlt || item.productTitle}
+                            style={{
+                              width: "150px",
+                              height: "150px",
+                              objectFit: "cover",
+                              borderRadius: "8px",
+                              display: "block",
+                            }}
+                          />
+                        </s-clickable>
+                      ) : (
+                        <s-thumbnail alt="No image" size="small-200" />
+                      )}
+                    </s-table-cell>
+
+                    <s-table-cell
+  style={cellStyle}
+>
                       <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
                       <s-stack gap="small" direction="inline">
   {isRush && <s-badge tone="critical">RUSH</s-badge>}
@@ -1717,61 +1801,6 @@ const cellStyle = {
                       >
                         <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
                           {isBundleRow ? (
-                            <s-stack gap="small" direction="inline">
-                              <s-text>{swatchesForOrder.length} swatches</s-text>
-                              <s-badge tone="warning">Swatch Bundle</s-badge>
-                            </s-stack>
-                          ) : (
-                            <s-stack gap="small" direction="inline">
-                              <s-link href={`shopify://admin/products/${productIdNum}`}>
-                                {item.sku || "-"}
-                              </s-link>
-                              {getVariantTypeBadge(item.variantTitle)}
-                            </s-stack>
-                          )}
-                        </s-clickable>
-                      </s-box>
-                    </s-table-cell>
-
-                    <s-table-cell
-  style={cellStyle}
->
-                      {item.productImage ? (
-                        <s-clickable
-                          onClick={() =>
-                            setPreviewImage({
-                              url: item.productImage!,
-                              alt: item.productImageAlt || item.productTitle,
-                            })
-                          }
-                        >
-                          <img
-                            src={item.productImage}
-                            alt={item.productImageAlt || item.productTitle}
-                            style={{
-                              width: "150px",
-                              height: "150px",
-                              objectFit: "cover",
-                              borderRadius: "8px",
-                              display: "block",
-                            }}
-                          />
-                        </s-clickable>
-                      ) : (
-                        <s-thumbnail alt="No image" size="small-200" />
-                      )}
-                    </s-table-cell>
-
-                    <s-table-cell
-  style={cellStyle}
->
-                      <s-box
-                        padding="small"
-                        background={isActive ? "strong" : multipleGroupBackground}
-                        borderRadius="small"
-                      >
-                        <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
-                          {isBundleRow ? (
                             <s-text>
                               {swatchesForOrder
                                 .map((s) => s.productTitle)
@@ -1781,27 +1810,6 @@ const cellStyle = {
                             <s-link href={`shopify://admin/products/${productIdNum}`}>
                               {item.productTitle}
                             </s-link>
-                          )}
-                        </s-clickable>
-                      </s-box>
-                    </s-table-cell>
-
-                    <s-table-cell
-  style={cellStyle}
->
-                      <s-box
-                        padding="small"
-                        background={isActive ? "strong" : multipleGroupBackground}
-                        borderRadius="small"
-                      >
-                        <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
-                          {isBundleRow ? (
-                            <s-text>{swatchesForOrder.length} swatches</s-text>
-                          ) : !item.variantTitle?.includes("By the Yard") &&
-                          item.quantity > 1 ? (
-                            <s-badge tone="critical">⚠️ {item.quantity} units</s-badge>
-                          ) : (
-                            formatQuantity(item.quantity, item.variantTitle)
                           )}
                         </s-clickable>
                       </s-box>
