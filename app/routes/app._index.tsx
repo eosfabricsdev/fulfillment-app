@@ -909,12 +909,14 @@ export default function CutListPage() {
 
     if (!value) return;
 
-    if (!item.barcode) {
+    if (!item.barcode && !item.sku) {
       setBarcodeErrors((prev) => ({ ...prev, [itemKey]: "NO_BARCODE" }));
       return;
     }
 
-    if (value !== item.barcode) {
+    const matchesBarcode = !!item.barcode && value === item.barcode;
+    const matchesSku = !!item.sku && value === item.sku;
+    if (!matchesBarcode && !matchesSku) {
       setBarcodeErrors((prev) => ({ ...prev, [itemKey]: "MISMATCH" }));
       return;
     }
@@ -1936,7 +1938,7 @@ const cellStyle = {
                           <s-text-field
                             label="Scan Barcode"
                             labelAccessibilityVisibility="exclusive"
-                            placeholder="Scan barcode to verify item"
+                            placeholder="Scan barcode or SKU"
                             value={barcodeInputs[itemKey] || ""}
                             onInput={(e) =>
                               handleBarcodeScan(itemKey, e.currentTarget.value, item)
@@ -1945,7 +1947,7 @@ const cellStyle = {
                           {barcodeErrors[itemKey] === "NO_BARCODE" && (
                             <s-banner tone="warning">
                               <s-text>
-                                No barcode on file. Please add a barcode to this product variant in
+                                No barcode or SKU on file. Please add one to this product variant in
                                 Shopify before continuing fulfillment.
                               </s-text>
                             </s-banner>
@@ -1953,7 +1955,7 @@ const cellStyle = {
                           {barcodeErrors[itemKey] === "MISMATCH" && (
                             <s-banner tone="critical">
                               <s-text>
-                                ⚠️ WRONG ITEM SCANNED. Barcode does not match. Please scan the
+                                ⚠️ WRONG ITEM SCANNED. Barcode/SKU does not match. Please scan the
                                 correct item.
                               </s-text>
                             </s-banner>
