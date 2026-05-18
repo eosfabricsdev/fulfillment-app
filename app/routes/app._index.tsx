@@ -415,8 +415,14 @@ export default function CutListPage() {
   const [barcodeErrors, setBarcodeErrors] = useState<Record<string, string>>({});
 
   const rushOrders = useMemo(
-    () => cutListItems.filter((item) => isRushOrder(item.orderTags)),
-    [cutListItems],
+    () =>
+      cutListItems.filter(
+        (item) =>
+          isRushOrder(item.orderTags) &&
+          !hasReadyToShipTag(item) &&
+          !pickedItems.has(item.lineItemId),
+      ),
+    [cutListItems, pickedItems],
   );
 
   const holdItems = useMemo(() => {
@@ -455,6 +461,60 @@ export default function CutListPage() {
     new Set(),
   );
   const scanInputRef = useRef<any>(null);
+
+  const [lockedSkus, setLockedSkus] = useState<string[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      const stored = window.localStorage.getItem("lockedSkus");
+      if (!stored) return [];
+      const parsed = JSON.parse(stored);
+      return Array.isArray(parsed)
+        ? parsed.filter((s) => typeof s === "string")
+        : [];
+    } catch {
+      return [];
+    }
+  });
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem("lockedSkus", JSON.stringify(lockedSkus));
+    } catch {
+      // ignore quota errors
+    }
+  }, [lockedSkus]);
+
+  useEffect(() => {
+    if (!activeLineId) return;
+    const activeItem = cutListItems.find(
+      (i) => i.lineItemId === activeLineId,
+    );
+    if (!activeItem) return;
+    if (!activeItem.sku) return;
+    if (activeItem.sku === VIRTUAL_SKU) return;
+    if (isSwatch(activeItem)) return;
+
+    setLockedSkus((prev) => {
+      if (prev.includes(activeItem.sku)) return prev;
+      return [...prev, activeItem.sku];
+    });
+  }, [activeLineId, cutListItems]);
+
+  useEffect(() => {
+    setLockedSkus((prev) => {
+      const remaining = prev.filter((sku) =>
+        cutListItems.some(
+          (item) =>
+            item.sku === sku &&
+            !hasReadyToShipTag(item) &&
+            !pickedItems.has(item.lineItemId),
+        ),
+      );
+      if (remaining.length === prev.length) return prev;
+      return remaining;
+    });
+  }, [cutListItems, pickedItems]);
 
   useEffect(() => {
     if (!activeLineId) return;
@@ -635,6 +695,32 @@ export default function CutListPage() {
     return [...rushItems, ...sortedNonRush];
   };
 
+  const applyLockedSkuPrioritization = (
+    items: CutListItem[],
+    locked: string[],
+  ): CutListItem[] => {
+    if (locked.length === 0) return items;
+    const lockedSet = new Set(locked);
+    const itemsBySku = new Map<string, CutListItem[]>();
+    const otherItems: CutListItem[] = [];
+
+    for (const item of items) {
+      if (item.sku && lockedSet.has(item.sku)) {
+        if (!itemsBySku.has(item.sku)) itemsBySku.set(item.sku, []);
+        itemsBySku.get(item.sku)!.push(item);
+      } else {
+        otherItems.push(item);
+      }
+    }
+
+    const result: CutListItem[] = [];
+    for (const sku of locked) {
+      const group = itemsBySku.get(sku);
+      if (group) result.push(...group);
+    }
+    return [...result, ...otherItems];
+  };
+
   const processRushItems = (items: CutListItem[]): CutListItem[] => {
     return [...items].sort(
       (a, b) =>
@@ -719,14 +805,28 @@ export default function CutListPage() {
   };
 
   const cutListItemsVisible = cutListItems.filter(
-    (item) => !hasReadyToShipTag(item),
+    (item) =>
+      !hasReadyToShipTag(item) && !pickedItems.has(item.lineItemId),
   );
 
   const getFilteredItems = (): CutListItem[] => {
     if (currentFilter === "pickedToday") {
-      return pickedTodayItems.filter(
+      const items = pickedTodayItems.filter(
         (item) => isItemCut(item) && item.quantity > 0,
       );
+      const orderGroups = new Map<string, CutListItem[]>();
+      for (const item of items) {
+        if (!orderGroups.has(item.orderId)) {
+          orderGroups.set(item.orderId, []);
+        }
+        orderGroups.get(item.orderId)!.push(item);
+      }
+      const sortedGroups = Array.from(orderGroups.values()).sort(
+        (a, b) =>
+          new Date(a[0].orderCreatedAt).getTime() -
+          new Date(b[0].orderCreatedAt).getTime(),
+      );
+      return sortedGroups.flat();
     }
 
     if (currentFilter === "rush") {
@@ -768,7 +868,10 @@ export default function CutListPage() {
       return sortedGroups.flat();
     }
 
-    const allItems = applyRushFirstSort(cutListItemsVisible);
+    const allItems = applyLockedSkuPrioritization(
+      applyRushFirstSort(cutListItemsVisible),
+      lockedSkus,
+    );
 
     if (currentFilter === "rollEnds") {
       const rollEndOrders = new Set<string>();
@@ -1601,14 +1704,14 @@ const multipleGroupBackground =
     ? customerGroupIndex % 2 === 0
       ? "subdued"
       : "base"
-    : currentFilter === "readyToShip"
+    : currentFilter === "readyToShip" || currentFilter === "pickedToday"
       ? orderGroupIndex % 2 === 0
         ? "strong"
         : "base"
       : "transparent";
 
 const showOrderGroupBorder =
-  currentFilter === "readyToShip" &&
+  (currentFilter === "readyToShip" || currentFilter === "pickedToday") &&
   index > 0 &&
   filteredItems[index - 1]?.orderId !== item.orderId;
 
@@ -1870,6 +1973,11 @@ const cellStyle = {
                                 }
                               >
                                 <s-badge>Reprint Product Label</s-badge>
+                              </s-clickable>
+                              <s-clickable
+                                onClick={() => openReadyToShipModal(item.orderId)}
+                              >
+                                <s-badge tone="success">Ready to Ship</s-badge>
                               </s-clickable>
                             </s-stack>
                           </div>
