@@ -461,6 +461,21 @@ export default function CutListPage() {
     new Set(),
   );
   const scanInputRef = useRef<any>(null);
+  const completionModalRef = useRef<any>(null);
+
+  useEffect(() => {
+    const el = completionModalRef.current;
+    if (!el) return;
+    try {
+      if (completionMessage) {
+        el.showOverlay?.();
+      } else {
+        el.hideOverlay?.();
+      }
+    } catch {
+      // ignore
+    }
+  }, [completionMessage]);
 
   const [lockedSkus, setLockedSkus] = useState<string[]>(() => {
     if (typeof window === "undefined") return [];
@@ -2245,13 +2260,7 @@ const cellStyle = {
       <s-modal
         id="completion-modal"
         heading="Order Complete"
-        ref={(el) => {
-          if (el && completionMessage) {
-            el.showOverlay();
-          } else if (el && !completionMessage) {
-            el.hideOverlay();
-          }
-        }}
+        ref={completionModalRef}
         onHide={() => setCompletionMessage(null)}
       >
         <s-box padding="base">
@@ -2260,7 +2269,10 @@ const cellStyle = {
         <s-button
           slot="primary-action"
           variant="primary"
-          onClick={() => setCompletionMessage(null)}
+          onClick={() => {
+            completionModalRef.current?.hideOverlay?.();
+            setCompletionMessage(null);
+          }}
         >
           OK
         </s-button>
