@@ -351,8 +351,13 @@ export default function CutListPage() {
     for (const item of [...newCutListItems, ...newPickedTodayItems]) {
       const numericId = item.lineItemId.split("/").pop();
       if (!numericId) continue;
-      const tagToFind = `picked-line:${numericId}`.toLowerCase();
-      if (item.orderTags.some((t) => t.toLowerCase() === tagToFind)) {
+      const tagPrefix = `picked-line:${numericId}`.toLowerCase();
+      if (
+        item.orderTags.some((t) => {
+          const lower = t.toLowerCase();
+          return lower === tagPrefix || lower.startsWith(tagPrefix + "_");
+        })
+      ) {
         persistedPicked.add(item.lineItemId);
       }
     }
@@ -476,6 +481,25 @@ export default function CutListPage() {
       // ignore
     }
   }, [completionMessage]);
+
+  const [moveToCutListConfirm, setMoveToCutListConfirm] = useState<
+    CutListItem[] | null
+  >(null);
+  const moveToCutListModalRef = useRef<any>(null);
+
+  useEffect(() => {
+    const el = moveToCutListModalRef.current;
+    if (!el) return;
+    try {
+      if (moveToCutListConfirm) {
+        el.showOverlay?.();
+      } else {
+        el.hideOverlay?.();
+      }
+    } catch {
+      // ignore
+    }
+  }, [moveToCutListConfirm]);
 
   const [lockedSkus, setLockedSkus] = useState<string[]>(() => {
     if (typeof window === "undefined") return [];
@@ -802,8 +826,11 @@ export default function CutListPage() {
 
     const numericId = item.lineItemId.split("/").pop();
     if (!numericId) return false;
-    const lineTag = `picked-line:${numericId}`.toLowerCase();
-    return item.orderTags.some((t) => t.toLowerCase() === lineTag);
+    const tagPrefix = `picked-line:${numericId}`.toLowerCase();
+    return item.orderTags.some((t) => {
+      const lower = t.toLowerCase();
+      return lower === tagPrefix || lower.startsWith(tagPrefix + "_");
+    });
   }
 
 
@@ -1077,7 +1104,9 @@ export default function CutListPage() {
     const totalCount = orderItems.filter((i) => i.sku !== VIRTUAL_SKU).length;
     const timestamp = new Date().toISOString();
     const numericLineId = item.lineItemId.split("/").pop() || item.lineItemId;
-    const lineItemTag = `picked-line:${numericLineId}`;
+    const lineItemTag = item.sku
+      ? `picked-line:${numericLineId}_${item.sku}`
+      : `picked-line:${numericLineId}`;
     const orderHadPrintedTag = item.orderTags.some(
       (t) => t.toLowerCase() === "printed",
     );
@@ -1184,6 +1213,113 @@ export default function CutListPage() {
       includeCut: mode === "cut" ? "true" : "false",
     });
     window.open(`/print-label-both?${params.toString()}`, "_blank");
+  };
+
+  const moveItemsToCutList = (items: CutListItem[]) => {
+    if (items.length === 0) return;
+    const orderId = items[0].orderId;
+    const orderTags = items[0].orderTags;
+    const movingIds = new Set(items.map((i) => i.lineItemId));
+
+    const tagsToRemove: string[] = [];
+    for (const it of items) {
+      const numericId = it.lineItemId.split("/").pop() || it.lineItemId;
+      const pickedLinePrefix = `picked-line:${numericId}`.toLowerCase();
+      const readyToShipExact = `ready-to-ship:${numericId}`.toLowerCase();
+      for (const tag of orderTags) {
+        const lower = tag.toLowerCase();
+        if (
+          lower === pickedLinePrefix ||
+          lower.startsWith(pickedLinePrefix + "_")
+        ) {
+          tagsToRemove.push(tag);
+        }
+        if (lower === readyToShipExact) {
+          tagsToRemove.push(tag);
+        }
+      }
+    }
+
+    const allOrderItems = new Map<string, CutListItem>();
+    for (const i of [...cutListItems, ...pickedTodayItems]) {
+      if (i.orderId === orderId) {
+        allOrderItems.set(i.lineItemId, i);
+      }
+    }
+    const remainingPickedCount = Array.from(allOrderItems.values())
+      .filter((i) => !movingIds.has(i.lineItemId))
+      .filter((i) => pickedItems.has(i.lineItemId)).length;
+
+    const tagsToAdd: string[] = [];
+    if (remainingPickedCount === 0) {
+      if (orderTags.some((t) => t.toLowerCase() === "partially picked")) {
+        tagsToRemove.push("partially picked");
+      }
+      if (orderTags.some((t) => t.toLowerCase() === "picked")) {
+        tagsToRemove.push("picked");
+      }
+    } else if (orderTags.some((t) => t.toLowerCase() === "picked")) {
+      tagsToRemove.push("picked");
+      if (!orderTags.some((t) => t.toLowerCase() === "partially picked")) {
+        tagsToAdd.push("partially picked");
+      }
+    }
+
+    const dedupedRemove = Array.from(new Set(tagsToRemove));
+    if (dedupedRemove.length > 0) {
+      submitTagsRemove(orderId, dedupedRemove);
+    }
+    if (tagsToAdd.length > 0) {
+      submitTagsAdd(orderId, tagsToAdd);
+    }
+
+    setPickedItems((prev) => {
+      const next = new Set(prev);
+      items.forEach((it) => next.delete(it.lineItemId));
+      return next;
+    });
+    setPrintedLines((prev) => {
+      const next = new Set(prev);
+      items.forEach((it) => next.delete(it.lineItemId));
+      return next;
+    });
+    setReadyToPrint((prev) => {
+      const next = new Set(prev);
+      items.forEach((it) => next.delete(it.lineItemId));
+      return next;
+    });
+
+    const removeSet = new Set(dedupedRemove);
+    setCutListItems((prev) =>
+      prev.map((i) =>
+        i.orderId === orderId
+          ? {
+              ...i,
+              orderTags: Array.from(
+                new Set([
+                  ...i.orderTags.filter((t) => !removeSet.has(t)),
+                  ...tagsToAdd,
+                ]),
+              ),
+            }
+          : i,
+      ),
+    );
+    setPickedTodayItems((prev) =>
+      prev.map((i) =>
+        i.orderId === orderId
+          ? {
+              ...i,
+              orderTags: Array.from(
+                new Set([
+                  ...i.orderTags.filter((t) => !removeSet.has(t)),
+                  ...tagsToAdd,
+                ]),
+              ),
+            }
+          : i,
+      ),
+    );
   };
 
   const openReadyToShipModal = (orderId: string) => {
@@ -1299,7 +1435,9 @@ export default function CutListPage() {
     const timestamp = new Date().toISOString();
     const swatchLineTags = swatches.map((s) => {
       const numericId = s.lineItemId.split("/").pop() || s.lineItemId;
-      return `picked-line:${numericId}`;
+      return s.sku
+        ? `picked-line:${numericId}_${s.sku}`
+        : `picked-line:${numericId}`;
     });
     const printedTag = orderHadPrintedTag ? [] : ["printed"];
     const hadPartialTag = first.orderTags.some(
@@ -1992,7 +2130,16 @@ const cellStyle = {
                               <s-clickable
                                 onClick={() => openReadyToShipModal(item.orderId)}
                               >
-                                <s-badge tone="success">Ready to Ship</s-badge>
+                                <s-badge tone="success">Move to Ready to Ship</s-badge>
+                              </s-clickable>
+                              <s-clickable
+                                onClick={() =>
+                                  setMoveToCutListConfirm(
+                                    isBundleRow ? swatchesForOrder : [item],
+                                  )
+                                }
+                              >
+                                <s-badge tone="caution">Move to Cut List</s-badge>
                               </s-clickable>
                             </s-stack>
                           </div>
@@ -2014,7 +2161,7 @@ const cellStyle = {
                             variant="tertiary"
                             onClick={() => openReadyToShipModal(item.orderId)}
                           >
-                            Ready to Ship
+                            Move to Ready to Ship
                           </s-button>
                         </s-stack>
                       ) : isBundleRow ? (
@@ -2254,6 +2401,43 @@ const cellStyle = {
           onClick={() => setNoteModalContent(null)}
         >
           Acknowledge
+        </s-button>
+      </s-modal>
+
+      <s-modal
+        id="move-to-cut-list-modal"
+        heading="Move back to Cut List?"
+        ref={moveToCutListModalRef}
+        onHide={() => setMoveToCutListConfirm(null)}
+      >
+        <s-box padding="base">
+          <s-text>
+            This will place this item back on the cut list, meaning it will
+            need to be scanned and cut again as if it had just been ordered.
+            Confirm this is what you want?
+          </s-text>
+        </s-box>
+        <s-button
+          slot="primary-action"
+          variant="primary"
+          onClick={() => {
+            if (moveToCutListConfirm) {
+              moveItemsToCutList(moveToCutListConfirm);
+            }
+            moveToCutListModalRef.current?.hideOverlay?.();
+            setMoveToCutListConfirm(null);
+          }}
+        >
+          Confirm
+        </s-button>
+        <s-button
+          slot="secondary-actions"
+          onClick={() => {
+            moveToCutListModalRef.current?.hideOverlay?.();
+            setMoveToCutListConfirm(null);
+          }}
+        >
+          Cancel
         </s-button>
       </s-modal>
 
