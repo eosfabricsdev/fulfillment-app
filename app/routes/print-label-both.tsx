@@ -272,9 +272,10 @@ export default function PrintLabelBothPage() {
             font-size: 7pt;
             font-weight: 900;
             line-height: 1.08;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
+            white-space: normal;
+            overflow-wrap: break-word;
+            word-break: break-word;
+            hyphens: auto;
             margin-bottom: 0.6mm;
           }
 

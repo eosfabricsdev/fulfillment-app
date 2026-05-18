@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData, useRevalidator } from "react-router";
 import { authenticate } from "../shopify.server";
@@ -454,6 +454,15 @@ export default function CutListPage() {
   const [readyToShipSelections, setReadyToShipSelections] = useState<Set<string>>(
     new Set(),
   );
+  const scanInputRef = useRef<any>(null);
+
+  useEffect(() => {
+    if (!activeLineId) return;
+    const t = setTimeout(() => {
+      scanInputRef.current?.focus?.();
+    }, 50);
+    return () => clearTimeout(t);
+  }, [activeLineId]);
 
   useEffect(() => {
     if (tagFetcher.state === "idle" && tagFetcher.data?.ok) {
@@ -1492,11 +1501,11 @@ export default function CutListPage() {
             <s-table-header listSlot="labeled"></s-table-header>
             <s-table-header listSlot="primary">Product SKU</s-table-header>
             <s-table-header listSlot="labeled">Quantity</s-table-header>
+            <s-table-header listSlot="labeled">Bin Number</s-table-header>
             <s-table-header listSlot="labeled">Image</s-table-header>
             <s-table-header listSlot="labeled">Order Number</s-table-header>
             <s-table-header listSlot="labeled">Customer Name</s-table-header>
             <s-table-header listSlot="labeled">Order Note</s-table-header>
-            <s-table-header listSlot="labeled">Bin Number</s-table-header>
             <s-table-header listSlot="labeled">Product Title</s-table-header>
             <s-table-header listSlot="labeled">Order Time</s-table-header>
             <s-table-header listSlot="labeled">Product Count</s-table-header>
@@ -1669,6 +1678,20 @@ const cellStyle = {
                     <s-table-cell
   style={cellStyle}
 >
+                      <s-box
+                        padding="small"
+                        background={isActive ? "strong" : multipleGroupBackground}
+                        borderRadius="small"
+                      >
+                        <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
+                          <s-text>{item.binNumber || "-"}</s-text>
+                        </s-clickable>
+                      </s-box>
+                    </s-table-cell>
+
+                    <s-table-cell
+  style={cellStyle}
+>
                       {item.productImage ? (
                         <s-clickable
                           onClick={() =>
@@ -1776,20 +1799,6 @@ const cellStyle = {
                         ) : (
                           <s-text color="subdued">—</s-text>
                         )}
-                      </s-box>
-                    </s-table-cell>
-
-                    <s-table-cell
-  style={cellStyle}
->
-                      <s-box
-                        padding="small"
-                        background={isActive ? "strong" : multipleGroupBackground}
-                        borderRadius="small"
-                      >
-                        <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
-                          <s-text>{item.binNumber || "-"}</s-text>
-                        </s-clickable>
                       </s-box>
                     </s-table-cell>
 
@@ -1936,6 +1945,7 @@ const cellStyle = {
                       ) : isActive ? (
                         <s-stack gap="small">
                           <s-text-field
+                            ref={scanInputRef}
                             label="Scan Barcode"
                             labelAccessibilityVisibility="exclusive"
                             placeholder="Scan barcode or SKU"
