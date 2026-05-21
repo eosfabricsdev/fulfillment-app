@@ -16,11 +16,12 @@ type Variant = {
   id: string;
   barcode: string | null;
   inventoryQuantity: number;
-  metafields: {
-    edges: Array<{
-      node: Metafield;
-    }>;
-  };
+  image: {
+    url: string;
+    altText: string | null;
+  } | null;
+  binNumber: { value: string } | null;
+  colorCode: { value: string } | null;
 } | null;
 
 type Product = {
@@ -93,6 +94,7 @@ type CutListItem = {
   barcode: string | null;
   binNumber: string;
   fabricLength: string | null;
+  colorCode: string | null;
   hasHold: boolean;
   allLineItems: LineItem[];
   productImage: string | null;
@@ -132,14 +134,9 @@ function toCutListItems(
       
       if (lineItem.sku === VIRTUAL_SKU) continue;
 
-      const binNumber =
-        lineItem.variant?.metafields?.edges.find(
-          (e) => e.node.key === "bin_number",
-        )?.node.value || "";
-      const fabricLength =
-        lineItem.variant?.metafields?.edges.find(
-          (e) => e.node.key === "fabric_length",
-        )?.node.value || null;
+      const binNumber = lineItem.variant?.binNumber?.value || "";
+      const colorCode = lineItem.variant?.colorCode?.value || null;
+      const fabricLength = null;
 
         if (!lineItem.title) continue;
         if (!lineItem.id) continue;
@@ -163,10 +160,17 @@ function toCutListItems(
         binNumber,
         hasHold,
         allLineItems,
-        productImage: lineItem.product?.featuredImage?.url || null,
-        productImageAlt: lineItem.product?.featuredImage?.altText || null,
+        productImage:
+          lineItem.variant?.image?.url ||
+          lineItem.product?.featuredImage?.url ||
+          null,
+        productImageAlt:
+          lineItem.variant?.image?.altText ||
+          lineItem.product?.featuredImage?.altText ||
+          null,
         productType: lineItem.product?.productType || null,
         fabricLength,
+        colorCode,
       });
     }
   }
@@ -221,14 +225,15 @@ async function queryOrders(admin: any, query: string) {
                     id
                     barcode
                     inventoryQuantity
-                    metafields(first: 20) {
-                      edges {
-                        node {
-                          key
-                          value
-                          namespace
-                        }
-                      }
+                    image {
+                      url
+                      altText
+                    }
+                    binNumber: metafield(namespace: "custom", key: "bin_number") {
+                      value
+                    }
+                    colorCode: metafield(namespace: "custom", key: "color_code") {
+                      value
                     }
                   }
                 }
@@ -501,28 +506,33 @@ export default function CutListPage() {
     }
   }, [moveToCutListConfirm]);
 
-  const [lockedSkus, setLockedSkus] = useState<string[]>(() => {
-    if (typeof window === "undefined") return [];
-    try {
-      const stored = window.localStorage.getItem("lockedSkus");
-      if (!stored) return [];
-      const parsed = JSON.parse(stored);
-      return Array.isArray(parsed)
-        ? parsed.filter((s) => typeof s === "string")
-        : [];
-    } catch {
-      return [];
-    }
-  });
+  const [skuAnchorTimes, setSkuAnchorTimes] = useState<Record<string, number>>(
+    () => {
+      if (typeof window === "undefined") return {};
+      try {
+        const stored = window.localStorage.getItem("skuAnchorTimes");
+        if (!stored) return {};
+        const parsed = JSON.parse(stored);
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+          ? parsed
+          : {};
+      } catch {
+        return {};
+      }
+    },
+  );
 
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
-      window.localStorage.setItem("lockedSkus", JSON.stringify(lockedSkus));
+      window.localStorage.setItem(
+        "skuAnchorTimes",
+        JSON.stringify(skuAnchorTimes),
+      );
     } catch {
-      // ignore quota errors
+      // ignore
     }
-  }, [lockedSkus]);
+  }, [skuAnchorTimes]);
 
   useEffect(() => {
     if (!activeLineId) return;
@@ -534,24 +544,37 @@ export default function CutListPage() {
     if (activeItem.sku === VIRTUAL_SKU) return;
     if (isSwatch(activeItem)) return;
 
-    setLockedSkus((prev) => {
-      if (prev.includes(activeItem.sku)) return prev;
-      return [...prev, activeItem.sku];
+    setSkuAnchorTimes((prev) => {
+      if (prev[activeItem.sku] != null) return prev;
+      const sameSkuItems = cutListItems.filter(
+        (i) => i.sku === activeItem.sku,
+      );
+      if (sameSkuItems.length === 0) return prev;
+      const earliest = Math.min(
+        ...sameSkuItems.map((i) => new Date(i.orderCreatedAt).getTime()),
+      );
+      return { ...prev, [activeItem.sku]: earliest };
     });
   }, [activeLineId, cutListItems]);
 
   useEffect(() => {
-    setLockedSkus((prev) => {
-      const remaining = prev.filter((sku) =>
-        cutListItems.some(
+    setSkuAnchorTimes((prev) => {
+      const next: Record<string, number> = {};
+      let changed = false;
+      for (const sku of Object.keys(prev)) {
+        const hasItems = cutListItems.some(
           (item) =>
             item.sku === sku &&
             !hasReadyToShipTag(item) &&
             !pickedItems.has(item.lineItemId),
-        ),
-      );
-      if (remaining.length === prev.length) return prev;
-      return remaining;
+        );
+        if (hasItems) {
+          next[sku] = prev[sku];
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
     });
   }, [cutListItems, pickedItems]);
 
@@ -592,16 +615,33 @@ export default function CutListPage() {
         activeEl?.tagName === "INPUT" ||
         activeEl?.tagName === "TEXTAREA" ||
         activeEl?.getAttribute("contenteditable") === "true";
-  
+
       if (isTyping) return;
       if (revalidator.state !== "idle") return;
       if (showProductCountModal || !!previewImage) return;
-  
+
       revalidator.revalidate();
     }, 30000);
-  
+
     return () => clearInterval(refreshInterval);
   }, [revalidator, showProductCountModal, previewImage]);
+
+  useEffect(() => {
+    const onVisible = () => {
+      if (
+        document.visibilityState === "visible" &&
+        revalidator.state === "idle"
+      ) {
+        revalidator.revalidate();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onVisible);
+    };
+  }, [revalidator]);
 
   useEffect(() => {
     setLastUpdated(new Date());
@@ -623,6 +663,13 @@ export default function CutListPage() {
     tagFetcher.submit(form, { method: "post" });
   }
 
+  const effectiveCreatedAt = (item: CutListItem): number => {
+    if (item.sku && skuAnchorTimes[item.sku] != null) {
+      return skuAnchorTimes[item.sku];
+    }
+    return new Date(item.orderCreatedAt).getTime();
+  };
+
   const applyCustomerBatchingSort = (items: CutListItem[]): CutListItem[] => {
     const customerGroups = new Map<string, CutListItem[]>();
 
@@ -636,9 +683,7 @@ export default function CutListPage() {
 
     const customerGroupsWithLatest = Array.from(customerGroups.entries()).map(
       ([customerId, items]) => {
-        const latestTime = Math.max(
-          ...items.map((i) => new Date(i.orderCreatedAt).getTime()),
-        );
+        const latestTime = Math.max(...items.map((i) => effectiveCreatedAt(i)));
         return { customerId, items, latestTime };
       },
     );
@@ -647,11 +692,7 @@ export default function CutListPage() {
 
     const sortedItems: CutListItem[] = [];
     for (const group of customerGroupsWithLatest) {
-      group.items.sort(
-        (a, b) =>
-          new Date(a.orderCreatedAt).getTime() -
-          new Date(b.orderCreatedAt).getTime(),
-      );
+      group.items.sort((a, b) => effectiveCreatedAt(a) - effectiveCreatedAt(b));
       sortedItems.push(...group.items);
     }
 
@@ -670,11 +711,7 @@ export default function CutListPage() {
       if (processedSkus.has(item.sku)) continue;
 
       const skuGroup = skuGroups.get(item.sku)!;
-      skuGroup.sort(
-        (a, b) =>
-          new Date(a.orderCreatedAt).getTime() -
-          new Date(b.orderCreatedAt).getTime(),
-      );
+      skuGroup.sort((a, b) => effectiveCreatedAt(a) - effectiveCreatedAt(b));
       finalItems.push(...skuGroup);
       processedSkus.add(item.sku);
     }
@@ -724,40 +761,10 @@ export default function CutListPage() {
     const rushItems = items.filter((item) => rushOrderIds.has(item.orderId));
     const nonRushItems = items.filter((item) => !rushOrderIds.has(item.orderId));
 
-    rushItems.sort(
-      (a, b) =>
-        new Date(a.orderCreatedAt).getTime() -
-        new Date(b.orderCreatedAt).getTime(),
-    );
+    rushItems.sort((a, b) => effectiveCreatedAt(a) - effectiveCreatedAt(b));
 
     const sortedNonRush = applyCustomerBatchingSort(nonRushItems);
     return [...rushItems, ...sortedNonRush];
-  };
-
-  const applyLockedSkuPrioritization = (
-    items: CutListItem[],
-    locked: string[],
-  ): CutListItem[] => {
-    if (locked.length === 0) return items;
-    const lockedSet = new Set(locked);
-    const itemsBySku = new Map<string, CutListItem[]>();
-    const otherItems: CutListItem[] = [];
-
-    for (const item of items) {
-      if (item.sku && lockedSet.has(item.sku)) {
-        if (!itemsBySku.has(item.sku)) itemsBySku.set(item.sku, []);
-        itemsBySku.get(item.sku)!.push(item);
-      } else {
-        otherItems.push(item);
-      }
-    }
-
-    const result: CutListItem[] = [];
-    for (const sku of locked) {
-      const group = itemsBySku.get(sku);
-      if (group) result.push(...group);
-    }
-    return [...result, ...otherItems];
   };
 
   const processRushItems = (items: CutListItem[]): CutListItem[] => {
@@ -787,7 +794,9 @@ export default function CutListPage() {
     if (variantTitle?.includes("By the Yard")) {
       return (
         <s-stack gap="small">
-          <s-text type="strong">{(quantity / 4).toFixed(2)} yds</s-text>
+          <span style={{ fontSize: "1.25em", fontWeight: 700 }}>
+            {(quantity / 4).toFixed(2)} yds
+          </span>
           <s-text>{quantity} units</s-text>
         </s-stack>
       );
@@ -910,10 +919,7 @@ export default function CutListPage() {
       return sortedGroups.flat();
     }
 
-    const allItems = applyLockedSkuPrioritization(
-      applyRushFirstSort(cutListItemsVisible),
-      lockedSkus,
-    );
+    const allItems = applyRushFirstSort(cutListItemsVisible);
 
     if (currentFilter === "rollEnds") {
       const rollEndOrders = new Set<string>();
@@ -1087,6 +1093,35 @@ export default function CutListPage() {
     }
   };
 
+  const upsertOrderInPickedToday = (
+    orderId: string,
+    tagsToAdd: string[],
+    tagsToRemoveFromOrder: string[] = [],
+  ) => {
+    setPickedTodayItems((prev) => {
+      const applyTagChanges = (existing: string[]) =>
+        Array.from(
+          new Set([
+            ...existing.filter((t) => !tagsToRemoveFromOrder.includes(t)),
+            ...tagsToAdd,
+          ]),
+        );
+
+      const exists = prev.some((i) => i.orderId === orderId);
+      if (exists) {
+        return prev.map((i) =>
+          i.orderId === orderId
+            ? { ...i, orderTags: applyTagChanges(i.orderTags) }
+            : i,
+        );
+      }
+      const newOrderItems = cutListItems
+        .filter((i) => i.orderId === orderId)
+        .map((i) => ({ ...i, orderTags: applyTagChanges(i.orderTags) }));
+      return [...prev, ...newOrderItems];
+    });
+  };
+
   const openPrint = (
     item: CutListItem,
     includeBin: boolean,
@@ -1132,6 +1167,7 @@ export default function CutListPage() {
             : i,
         ),
       );
+      upsertOrderInPickedToday(item.orderId, tagsToAdd, ["partially picked"]);
 
       setCompletionMessage(
         `Order ${item.orderName} is complete. All items cut.`,
@@ -1155,6 +1191,7 @@ export default function CutListPage() {
             : i,
         ),
       );
+      upsertOrderInPickedToday(item.orderId, tagsToAdd);
     } else {
       const tagsToAdd = [lineItemTag, ...printedTag];
       submitTagsAdd(item.orderId, tagsToAdd);
@@ -1169,6 +1206,7 @@ export default function CutListPage() {
             : i,
         ),
       );
+      upsertOrderInPickedToday(item.orderId, tagsToAdd);
     }
 
     setPickedItems((prev) => new Set(prev).add(item.lineItemId));
@@ -1257,6 +1295,9 @@ export default function CutListPage() {
       }
       if (orderTags.some((t) => t.toLowerCase() === "picked")) {
         tagsToRemove.push("picked");
+      }
+      if (orderTags.some((t) => t.toLowerCase() === "printed")) {
+        tagsToRemove.push("printed");
       }
     } else if (orderTags.some((t) => t.toLowerCase() === "picked")) {
       tagsToRemove.push("picked");
@@ -1463,6 +1504,7 @@ export default function CutListPage() {
             : i,
         ),
       );
+      upsertOrderInPickedToday(orderId, tagsToAdd, ["partially picked"]);
       setCompletionMessage(
         `Order ${orderName} is complete. All items cut.`,
       );
@@ -1484,6 +1526,7 @@ export default function CutListPage() {
             : i,
         ),
       );
+      upsertOrderInPickedToday(orderId, tagsToAdd);
     } else {
       const tagsToAdd = [...swatchLineTags, ...printedTag];
       submitTagsAdd(orderId, tagsToAdd);
@@ -1497,6 +1540,7 @@ export default function CutListPage() {
             : i,
         ),
       );
+      upsertOrderInPickedToday(orderId, tagsToAdd);
     }
 
     setPickedItems((prev) => {
@@ -1755,16 +1799,14 @@ export default function CutListPage() {
         >
           <s-table-header-row>
             <s-table-header listSlot="labeled"></s-table-header>
-            <s-table-header listSlot="primary">Product SKU</s-table-header>
-            <s-table-header listSlot="labeled">Quantity</s-table-header>
-            <s-table-header listSlot="labeled">Bin Number</s-table-header>
-            <s-table-header listSlot="labeled">Image</s-table-header>
-            <s-table-header listSlot="labeled">Order Number</s-table-header>
-            <s-table-header listSlot="labeled">Customer Name</s-table-header>
-            <s-table-header listSlot="labeled">Order Note</s-table-header>
-            <s-table-header listSlot="labeled">Product Title</s-table-header>
             <s-table-header listSlot="labeled">Order Time</s-table-header>
-            <s-table-header listSlot="labeled">Product Count</s-table-header>
+            <s-table-header listSlot="labeled">Customer Name</s-table-header>
+            <s-table-header listSlot="primary">Order Number</s-table-header>
+            <s-table-header listSlot="labeled">Product Title</s-table-header>
+            <s-table-header listSlot="labeled">Quantity</s-table-header>
+            <s-table-header listSlot="labeled">Image</s-table-header>
+            <s-table-header listSlot="labeled">Product SKU</s-table-header>
+            <s-table-header listSlot="labeled">Bin Number</s-table-header>
             <s-table-header listSlot="labeled">
               {currentFilter === "pickedToday" || currentFilter === "readyToShip"
                 ? "Picked By"
@@ -1893,18 +1935,103 @@ const cellStyle = {
                         borderRadius="small"
                       >
                         <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
-                          {isBundleRow ? (
-                            <s-stack gap="small" direction="inline">
-                              <s-text>{swatchesForOrder.length} swatches</s-text>
-                              <s-badge tone="warning">Swatch Bundle</s-badge>
-                            </s-stack>
+                          <s-text>{formatTimestamp(item.orderCreatedAt)}</s-text>
+                        </s-clickable>
+                      </s-box>
+                    </s-table-cell>
+
+                    <s-table-cell
+  style={cellStyle}
+>
+<s-box
+  padding="small"
+  background={isActive ? "strong" : multipleGroupBackground}
+  borderRadius="small"
+  borderBlockStartWidth={
+    currentFilter === "multiple" && isNewCustomerGroup ? "base" : "none"
+  }
+  borderColor="base"
+>
+                        <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
+                          {item.customerId ? (
+                            <s-link href={`shopify://admin/customers/${customerIdNum}`}>
+                              {item.customerName}
+                            </s-link>
                           ) : (
-                            <s-stack gap="small" direction="inline">
-                              <s-link href={`shopify://admin/products/${productIdNum}`}>
-                                {item.sku || "-"}
-                              </s-link>
-                              {getVariantTypeBadge(item.variantTitle)}
-                            </s-stack>
+                            <s-text>{item.customerName}</s-text>
+                          )}
+                        </s-clickable>
+                      </s-box>
+                    </s-table-cell>
+
+                    <s-table-cell
+  style={cellStyle}
+>
+                      <s-stack gap="small">
+                      <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
+                      <s-stack gap="small" direction="inline">
+  {isRush && <s-badge tone="critical">RUSH</s-badge>}
+  {isMultipleOrders && <s-badge tone="info">MULTIPLE ORDERS</s-badge>}
+  {item.hasHold && <s-badge tone="critical">FULFILLMENT HOLD</s-badge>}
+  {isFinalCut && (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        padding: "2px 8px",
+        backgroundColor: "#7C3AED",
+        color: "#FFFFFF",
+        fontSize: "0.75rem",
+        fontWeight: 600,
+        borderRadius: "8px",
+        lineHeight: 1.4,
+        letterSpacing: "0.02em",
+      }}
+    >
+      FINAL CUT
+    </span>
+  )}
+  {isInProgress && <s-badge tone="warning">IN PROGRESS</s-badge>}
+  {item.orderNote && (
+    <s-clickable
+      onClick={() =>
+        setNoteModalContent({
+          orderName: item.orderName,
+          note: item.orderNote!,
+        })
+      }
+    >
+      <s-badge tone="caution">📝 NOTE</s-badge>
+    </s-clickable>
+  )}
+  <s-link href={`shopify://admin/orders/${orderIdNum}`}>
+    {item.orderName}
+  </s-link>
+</s-stack>
+                      </s-clickable>
+                      <s-clickable onClick={() => handleProductCountClick(item)}>
+                        <s-badge>
+                          {item.allLineItems.filter((li) => li.sku !== VIRTUAL_SKU).length} items
+                        </s-badge>
+                      </s-clickable>
+                      </s-stack>
+                    </s-table-cell>
+
+<s-table-cell
+  style={cellStyle}
+>
+                      <s-box
+                        padding="small"
+                        background={isActive ? "strong" : multipleGroupBackground}
+                        borderRadius="small"
+                      >
+                        <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
+                          {isBundleRow ? (
+                            <s-text color="subdued">—</s-text>
+                          ) : (
+                            <s-link href={`shopify://admin/products/${productIdNum}`}>
+                              {item.productTitle}
+                            </s-link>
                           )}
                         </s-clickable>
                       </s-box>
@@ -1927,20 +2054,6 @@ const cellStyle = {
                           ) : (
                             formatQuantity(item.quantity, item.variantTitle)
                           )}
-                        </s-clickable>
-                      </s-box>
-                    </s-table-cell>
-
-                    <s-table-cell
-  style={cellStyle}
->
-                      <s-box
-                        padding="small"
-                        background={isActive ? "strong" : multipleGroupBackground}
-                        borderRadius="small"
-                      >
-                        <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
-                          <s-text>{item.binNumber || "-"}</s-text>
                         </s-clickable>
                       </s-box>
                     </s-table-cell>
@@ -1977,90 +2090,6 @@ const cellStyle = {
                     <s-table-cell
   style={cellStyle}
 >
-                      <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
-                      <s-stack gap="small" direction="inline">
-  {isRush && <s-badge tone="critical">RUSH</s-badge>}
-  {isMultipleOrders && <s-badge tone="info">MULTIPLE ORDERS</s-badge>}
-  {item.hasHold && <s-badge tone="critical">FULFILLMENT HOLD</s-badge>}
-  {isFinalCut && (
-    <span
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        padding: "2px 8px",
-        backgroundColor: "#7C3AED",
-        color: "#FFFFFF",
-        fontSize: "0.75rem",
-        fontWeight: 600,
-        borderRadius: "8px",
-        lineHeight: 1.4,
-        letterSpacing: "0.02em",
-      }}
-    >
-      FINAL CUT
-    </span>
-  )}
-  {isInProgress && <s-badge tone="warning">IN PROGRESS</s-badge>}
-  {item.orderNote && <s-badge tone="caution">📝 NOTE</s-badge>}
-  <s-link href={`shopify://admin/orders/${orderIdNum}`}>
-    {item.orderName}
-  </s-link>
-</s-stack>
-                      </s-clickable>
-                    </s-table-cell>
-
-                    <s-table-cell
-  style={cellStyle}
->
-<s-box
-  padding="small"
-  background={isActive ? "strong" : multipleGroupBackground}
-  borderRadius="small"
-  borderBlockStartWidth={
-    currentFilter === "multiple" && isNewCustomerGroup ? "base" : "none"
-  }
-  borderColor="base"
->
-                        <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
-                          {item.customerId ? (
-                            <s-link href={`shopify://admin/customers/${customerIdNum}`}>
-                              {item.customerName}
-                            </s-link>
-                          ) : (
-                            <s-text>{item.customerName}</s-text>
-                          )}
-                        </s-clickable>
-                      </s-box>
-                    </s-table-cell>
-
-                    <s-table-cell
-  style={cellStyle}
->
-                      <s-box
-                        padding="small"
-                        background={isActive ? "strong" : multipleGroupBackground}
-                        borderRadius="small"
-                      >
-                        {item.orderNote ? (
-                          <s-clickable
-                            onClick={() =>
-                              setNoteModalContent({
-                                orderName: item.orderName,
-                                note: item.orderNote!,
-                              })
-                            }
-                          >
-                            <s-text type="strong">📝 View note</s-text>
-                          </s-clickable>
-                        ) : (
-                          <s-text color="subdued">—</s-text>
-                        )}
-                      </s-box>
-                    </s-table-cell>
-
-                    <s-table-cell
-  style={cellStyle}
->
                       <s-box
                         padding="small"
                         background={isActive ? "strong" : multipleGroupBackground}
@@ -2068,15 +2097,22 @@ const cellStyle = {
                       >
                         <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
                           {isBundleRow ? (
-                            <s-text>
-                              {swatchesForOrder
-                                .map((s) => s.productTitle)
-                                .join(", ")}
-                            </s-text>
+                            <s-stack gap="small" direction="inline">
+                              <s-text>{swatchesForOrder.length} swatches</s-text>
+                              <s-badge tone="warning">Swatch Bundle</s-badge>
+                            </s-stack>
                           ) : (
-                            <s-link href={`shopify://admin/products/${productIdNum}`}>
-                              {item.productTitle}
-                            </s-link>
+                            <s-stack gap="small">
+                              <s-stack gap="small" direction="inline">
+                                <s-link href={`shopify://admin/products/${productIdNum}`}>
+                                  {item.sku || "-"}
+                                </s-link>
+                                {getVariantTypeBadge(item.variantTitle)}
+                              </s-stack>
+                              <s-text color="subdued">
+                                Color Code: {item.colorCode || "-"}
+                              </s-text>
+                            </s-stack>
                           )}
                         </s-clickable>
                       </s-box>
@@ -2091,17 +2127,9 @@ const cellStyle = {
                         borderRadius="small"
                       >
                         <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
-                          <s-text>{formatTimestamp(item.orderCreatedAt)}</s-text>
+                          <s-text>{item.binNumber || "-"}</s-text>
                         </s-clickable>
                       </s-box>
-                    </s-table-cell>
-
-                    <s-table-cell
-  style={cellStyle}
->
-                      <s-button variant="tertiary" onClick={() => handleProductCountClick(item)}>
-                        {item.allLineItems.filter((li) => li.sku !== VIRTUAL_SKU).length} items
-                      </s-button>
                     </s-table-cell>
 
                     <s-table-cell
@@ -2248,7 +2276,7 @@ const cellStyle = {
                       )}
                     </s-table-cell>
 
-                    <s-table-cell
+<s-table-cell
   style={cellStyle}
 >
                       <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
