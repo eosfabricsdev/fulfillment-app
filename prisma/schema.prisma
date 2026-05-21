@@ -32,3 +32,18 @@ model Session {
   refreshToken        String?
   refreshTokenExpires DateTime?
 }
+
+model CutEvent {
+  id          BigInt   @id @default(autoincrement())
+  createdAt   DateTime @default(now())
+  shop        String
+  cutterId    String?
+  cutterName  String
+  orderId     String
+  orderName   String?
+  lineItemId  String
+  sku         String?
+
+  @@index([shop, createdAt])
+  @@index([createdAt])
+}

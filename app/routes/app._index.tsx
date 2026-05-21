@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useFetcher, useLoaderData, useRevalidator } from "react-router";
 import { authenticate } from "../shopify.server";
+import prisma from "../db.server";
 
 const VIRTUAL_SKU = "85496775805861";
 
@@ -282,19 +283,77 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const cutListItems = toCutListItems(rawOrders, { includePicked: false });
   const pickedTodayItems = toCutListItems(pickedOrders, { includePicked: true });
 
+  let staffMember: { id: string; name: string; email: string | null } | null =
+    null;
+  try {
+    const staffResponse = await admin.graphql(
+      `#graphql
+      query GetCurrentStaffMember {
+        currentStaffMember {
+          id
+          name
+          email
+        }
+      }`,
+    );
+    const staffJson = await staffResponse.json();
+    const sm = staffJson.data?.currentStaffMember;
+    if (sm) {
+      staffMember = {
+        id: sm.id,
+        name: sm.name,
+        email: sm.email ?? null,
+      };
+    }
+  } catch {
+    // ignore — fall back to unknown
+  }
+
   return {
     cutListItems,
     pickedTodayItems,
     pageInfo: mainOrdersResult.pageInfo,
-    employeeName: "Unknown",
+    staffMember,
+    employeeName: staffMember?.name || "Unknown",
   };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-  const { admin } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
   const formData = await request.formData();
 
   const intent = String(formData.get("intent") || "");
+
+  if (intent === "logCut") {
+    const eventsJson = String(formData.get("events") || "[]");
+    try {
+      const events = JSON.parse(eventsJson) as Array<{
+        cutterId?: string | null;
+        cutterName: string;
+        orderId: string;
+        orderName?: string | null;
+        lineItemId: string;
+        sku?: string | null;
+      }>;
+      if (Array.isArray(events) && events.length > 0) {
+        await prisma.cutEvent.createMany({
+          data: events.map((e) => ({
+            shop: session.shop,
+            cutterId: e.cutterId ?? null,
+            cutterName: e.cutterName,
+            orderId: e.orderId,
+            orderName: e.orderName ?? null,
+            lineItemId: e.lineItemId,
+            sku: e.sku ?? null,
+          })),
+        });
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: String(err) };
+    }
+  }
+
   const orderId = String(formData.get("orderId") || "");
   const tags = formData.getAll("tags").map(String);
 
@@ -340,6 +399,35 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 export default function CutListPage() {
   const data = useLoaderData<typeof loader>();
   const tagFetcher = useFetcher();
+  const cutLogFetcher = useFetcher();
+  const staffMember = data.staffMember;
+
+  const submitLogCut = (
+    events: Array<{
+      orderId: string;
+      orderName: string;
+      lineItemId: string;
+      sku: string | null;
+    }>,
+  ) => {
+    if (events.length === 0) return;
+    const form = new FormData();
+    form.append("intent", "logCut");
+    form.append(
+      "events",
+      JSON.stringify(
+        events.map((e) => ({
+          cutterId: staffMember?.id ?? null,
+          cutterName: staffMember?.name || "Unknown",
+          orderId: e.orderId,
+          orderName: e.orderName,
+          lineItemId: e.lineItemId,
+          sku: e.sku ?? null,
+        })),
+      ),
+    );
+    cutLogFetcher.submit(form, { method: "post" });
+  };
   const revalidator = useRevalidator();
 
   const [cutListItems, setCutListItems] = useState<CutListItem[]>(
@@ -843,12 +931,23 @@ export default function CutListPage() {
   }
 
 
-  const getPickedByName = (orderTags: string[]): string => {
+  const getPickedByName = (item: CutListItem): string => {
+    const numericId = item.lineItemId.split("/").pop();
+    if (numericId) {
+      const prefix = `cut-by:${numericId}_`.toLowerCase();
+      for (const tag of item.orderTags) {
+        if (tag.toLowerCase().startsWith(prefix)) {
+          return tag.substring(prefix.length);
+        }
+      }
+    }
     const excludeTags = ["picked", "partially picked", "printed", "rush"];
     const isoDatePattern = /^\d{4}-\d{2}-\d{2}/;
-
-    for (const tag of orderTags) {
-      if (!excludeTags.includes(tag.toLowerCase()) && !isoDatePattern.test(tag)) {
+    for (const tag of item.orderTags) {
+      const lower = tag.toLowerCase();
+      if (lower.startsWith("cut-by:") || lower.startsWith("picked-line:"))
+        continue;
+      if (!excludeTags.includes(lower) && !isoDatePattern.test(tag)) {
         return tag;
       }
     }
@@ -862,9 +961,15 @@ export default function CutListPage() {
 
   const getFilteredItems = (): CutListItem[] => {
     if (currentFilter === "pickedToday") {
-      const items = pickedTodayItems.filter(
-        (item) => isItemCut(item) && item.quantity > 0,
-      );
+      const items = pickedTodayItems.filter((item) => {
+        if (!isItemCut(item)) return false;
+        if (item.quantity === 0) return false;
+        const orderFullyPicked = item.orderTags.some(
+          (t) => t.toLowerCase() === "picked",
+        );
+        if (orderFullyPicked) return false;
+        return true;
+      });
       const orderGroups = new Map<string, CutListItem[]>();
       for (const item of items) {
         if (!orderGroups.has(item.orderId)) {
@@ -1010,10 +1115,16 @@ export default function CutListPage() {
       if (allAreSwatches) swatchesOnlyCount++;
     });
 
-    const cutLogItems = pickedTodayItems.filter(
-      (item) =>
-        item.sku !== VIRTUAL_SKU && isItemCut(item) && item.quantity > 0,
-    );
+    const cutLogItems = pickedTodayItems.filter((item) => {
+      if (item.sku === VIRTUAL_SKU) return false;
+      if (!isItemCut(item)) return false;
+      if (item.quantity === 0) return false;
+      const orderFullyPicked = item.orderTags.some(
+        (t) => t.toLowerCase() === "picked",
+      );
+      if (orderFullyPicked) return false;
+      return true;
+    });
     const uniqueCutLogOrders = new Set(
       cutLogItems.map((item) => item.orderId),
     );
@@ -1130,7 +1241,7 @@ export default function CutListPage() {
     const skipWindow = options?.skipWindow ?? false;
     const skipCut = options?.skipCut ?? false;
     const includeCut = !skipCut;
-    const url = `/print-label-both?orderName=${encodeURIComponent(item.orderName)}&productTitle=${encodeURIComponent(item.productTitle)}&variantTitle=${encodeURIComponent(item.variantTitle || "")}&quantity=${item.quantity}&sku=${encodeURIComponent(item.sku || "")}&barcode=${encodeURIComponent(item.barcode || "")}&includeBin=${includeBin}&includeCut=${includeCut}`;
+    const url = `/print-label-both?orderName=${encodeURIComponent(item.orderName)}&productTitle=${encodeURIComponent(item.productTitle)}&variantTitle=${encodeURIComponent(item.variantTitle || "")}&quantity=${item.quantity}&sku=${encodeURIComponent(item.sku || "")}&barcode=${encodeURIComponent(item.barcode || "")}&colorCode=${encodeURIComponent(item.colorCode || "")}&includeBin=${includeBin}&includeCut=${includeCut}`;
 
     const orderItems = cutListItems.filter((i) => i.orderId === item.orderId);
     const pickedCount = orderItems.filter(
@@ -1142,13 +1253,15 @@ export default function CutListPage() {
     const lineItemTag = item.sku
       ? `picked-line:${numericLineId}_${item.sku}`
       : `picked-line:${numericLineId}`;
+    const cutByName = (employeeName || "Unknown").replace(/,/g, "").trim();
+    const cutByTag = `cut-by:${numericLineId}_${cutByName}`;
     const orderHadPrintedTag = item.orderTags.some(
       (t) => t.toLowerCase() === "printed",
     );
     const printedTag = includeBin && !orderHadPrintedTag ? ["printed"] : [];
 
     if (pickedCount === totalCount) {
-      const tagsToAdd = ["picked", timestamp, lineItemTag, ...printedTag];
+      const tagsToAdd = ["picked", timestamp, lineItemTag, cutByTag, ...printedTag];
       submitTagsRemove(item.orderId, ["partially picked"]);
       submitTagsAdd(item.orderId, tagsToAdd);
 
@@ -1177,6 +1290,7 @@ export default function CutListPage() {
         "partially picked",
         timestamp,
         lineItemTag,
+        cutByTag,
         ...printedTag,
       ];
       submitTagsAdd(item.orderId, tagsToAdd);
@@ -1193,7 +1307,7 @@ export default function CutListPage() {
       );
       upsertOrderInPickedToday(item.orderId, tagsToAdd);
     } else {
-      const tagsToAdd = [lineItemTag, ...printedTag];
+      const tagsToAdd = [lineItemTag, cutByTag, ...printedTag];
       submitTagsAdd(item.orderId, tagsToAdd);
 
       setCutListItems((prev) =>
@@ -1216,6 +1330,15 @@ export default function CutListPage() {
       next.delete(item.lineItemId);
       return next;
     });
+
+    submitLogCut([
+      {
+        orderId: item.orderId,
+        orderName: item.orderName,
+        lineItemId: item.lineItemId,
+        sku: item.sku || null,
+      },
+    ]);
 
     if (!skipWindow) {
       window.open(url, "_blank");
@@ -1247,6 +1370,7 @@ export default function CutListPage() {
       quantity: String(item.quantity),
       sku: item.sku || "",
       barcode: item.barcode || "",
+      colorCode: item.colorCode || "",
       includeBin: mode === "bin" ? "true" : "false",
       includeCut: mode === "cut" ? "true" : "false",
     });
@@ -1264,6 +1388,7 @@ export default function CutListPage() {
       const numericId = it.lineItemId.split("/").pop() || it.lineItemId;
       const pickedLinePrefix = `picked-line:${numericId}`.toLowerCase();
       const readyToShipExact = `ready-to-ship:${numericId}`.toLowerCase();
+      const cutByPrefix = `cut-by:${numericId}_`.toLowerCase();
       for (const tag of orderTags) {
         const lower = tag.toLowerCase();
         if (
@@ -1273,6 +1398,9 @@ export default function CutListPage() {
           tagsToRemove.push(tag);
         }
         if (lower === readyToShipExact) {
+          tagsToRemove.push(tag);
+        }
+        if (lower.startsWith(cutByPrefix)) {
           tagsToRemove.push(tag);
         }
       }
@@ -1429,6 +1557,7 @@ export default function CutListPage() {
           quantity: s.quantity,
           sku: s.sku,
           barcode: s.barcode,
+          colorCode: s.colorCode || null,
         })),
       ),
     );
@@ -1452,6 +1581,7 @@ export default function CutListPage() {
           quantity: s.quantity,
           sku: s.sku,
           barcode: s.barcode,
+          colorCode: s.colorCode || null,
         })),
       ),
     );
@@ -1480,13 +1610,18 @@ export default function CutListPage() {
         ? `picked-line:${numericId}_${s.sku}`
         : `picked-line:${numericId}`;
     });
+    const cutByName = (employeeName || "Unknown").replace(/,/g, "").trim();
+    const cutByTags = swatches.map((s) => {
+      const numericId = s.lineItemId.split("/").pop() || s.lineItemId;
+      return `cut-by:${numericId}_${cutByName}`;
+    });
     const printedTag = orderHadPrintedTag ? [] : ["printed"];
     const hadPartialTag = first.orderTags.some(
       (t) => t.toLowerCase() === "partially picked",
     );
 
     if (pickedCount === totalCount) {
-      const tagsToAdd = ["picked", timestamp, ...swatchLineTags, ...printedTag];
+      const tagsToAdd = ["picked", timestamp, ...swatchLineTags, ...cutByTags, ...printedTag];
       submitTagsRemove(orderId, ["partially picked"]);
       submitTagsAdd(orderId, tagsToAdd);
       setCutListItems((prev) =>
@@ -1513,6 +1648,7 @@ export default function CutListPage() {
         "partially picked",
         timestamp,
         ...swatchLineTags,
+        ...cutByTags,
         ...printedTag,
       ];
       submitTagsAdd(orderId, tagsToAdd);
@@ -1528,7 +1664,7 @@ export default function CutListPage() {
       );
       upsertOrderInPickedToday(orderId, tagsToAdd);
     } else {
-      const tagsToAdd = [...swatchLineTags, ...printedTag];
+      const tagsToAdd = [...swatchLineTags, ...cutByTags, ...printedTag];
       submitTagsAdd(orderId, tagsToAdd);
       setCutListItems((prev) =>
         prev.map((i) =>
@@ -1558,6 +1694,15 @@ export default function CutListPage() {
       swatches.forEach((s) => next.delete(s.lineItemId));
       return next;
     });
+
+    submitLogCut(
+      swatches.map((s) => ({
+        orderId: s.orderId,
+        orderName: s.orderName,
+        lineItemId: s.lineItemId,
+        sku: s.sku || null,
+      })),
+    );
 
     window.open(url, "_blank");
 
@@ -2109,9 +2254,11 @@ const cellStyle = {
                                 </s-link>
                                 {getVariantTypeBadge(item.variantTitle)}
                               </s-stack>
-                              <s-text color="subdued">
-                                Color Code: {item.colorCode || "-"}
-                              </s-text>
+                              {item.colorCode && (
+                                <s-text color="subdued">
+                                  Color Code: {item.colorCode}
+                                </s-text>
+                              )}
                             </s-stack>
                           )}
                         </s-clickable>
@@ -2138,7 +2285,7 @@ const cellStyle = {
                       {currentFilter === "pickedToday" ||
                       currentFilter === "readyToShip" ? (
                         <s-stack gap="small">
-                          <s-text>{getPickedByName(item.orderTags)}</s-text>
+                          <s-text>{getPickedByName(item)}</s-text>
                           <div style={{ textAlign: "center" }}>
                             <s-stack gap="small">
                               <s-clickable

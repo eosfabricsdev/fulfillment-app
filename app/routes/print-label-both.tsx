@@ -8,6 +8,7 @@ type LabelItem = {
   quantity: number;
   sku: string;
   barcode: string | null;
+  colorCode?: string | null;
 };
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
@@ -33,6 +34,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         quantity: Number(url.searchParams.get("quantity") || "1"),
         sku: url.searchParams.get("sku") || "TEST-SKU",
         barcode: url.searchParams.get("barcode") || null,
+        colorCode: url.searchParams.get("colorCode") || null,
       },
     ];
   }
@@ -113,7 +115,7 @@ function generateCutLabelHtml(item: LabelItem, orderName: string): string {
             : `<div class="no-barcode">NO BARCODE ON FILE</div>`
         }
 
-        <div class="sku-line">SKU: ${safeSku || "-"}</div>
+        <div class="sku-line">SKU: ${safeSku || "-"}${item.colorCode ? ` | #${escapeHtml(item.colorCode)}` : ""}</div>
       </div>
     </section>
   `;
