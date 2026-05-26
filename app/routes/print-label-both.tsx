@@ -22,9 +22,13 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   let items: LabelItem[];
   if (itemsParam) {
     try {
-      items = JSON.parse(decodeURIComponent(itemsParam));
+      items = JSON.parse(itemsParam);
     } catch {
-      items = [];
+      try {
+        items = JSON.parse(decodeURIComponent(itemsParam));
+      } catch {
+        items = [];
+      }
     }
   } else {
     items = [
@@ -84,7 +88,11 @@ function generateBinLabelHtml(orderName: string): string {
 
 function generateCutLabelHtml(item: LabelItem, orderName: string): string {
   const safeTitle = escapeHtml(item.productTitle);
-  const safeVariant = escapeHtml(item.variantTitle || "");
+  const rawVariant = item.variantTitle || "";
+  const byYardIdx = rawVariant.toLowerCase().indexOf("by the yard");
+  const displayVariant =
+    byYardIdx >= 0 ? rawVariant.substring(byYardIdx) : rawVariant;
+  const safeVariant = escapeHtml(displayVariant);
   const safeSku = escapeHtml(item.sku || "");
   const safeOrderName = escapeHtml(orderName);
   const qtyDisplay = escapeHtml(getQtyDisplay(item.quantity, item.variantTitle));

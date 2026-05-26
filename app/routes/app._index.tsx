@@ -39,6 +39,7 @@ type LineItem = {
   title: string;
   quantity: number;
   currentQuantity: number;
+  unfulfilledQuantity: number;
   fulfillmentStatus: string | null;
   sku: string | null;
   vendor: string | null;
@@ -128,7 +129,8 @@ function toCutListItems(
     for (const edge of order.lineItems.edges) {
       const lineItem = edge.node;
       if (!includePicked) {
-        if (lineItem.fulfillmentStatus === "FULFILLED") continue;
+        if (lineItem.unfulfilledQuantity === 0) continue;
+        if (lineItem.fulfillmentStatus?.toLowerCase() === "fulfilled") continue;
         if (lineItem.currentQuantity === 0) continue;
         if (isPickedByTag(order.tags ?? [])) continue;
       }
@@ -210,6 +212,7 @@ async function queryOrders(admin: any, query: string) {
                   title
                   quantity
                   currentQuantity
+                  unfulfilledQuantity
                   fulfillmentStatus
                   sku
                   vendor
