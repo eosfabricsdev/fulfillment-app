@@ -73,7 +73,8 @@ function generateBinLabelHtml(orderName: string): string {
   return `
     <section class="label-page">
       <div class="label-shell bin-label">
-        <div class="bin-order">ORDER ${safeOrderName}</div>
+        <div class="bin-label-prefix">ORDER</div>
+        <div class="bin-order">${safeOrderName}</div>
         <div class="barcode-wrap">
           <svg
             id="bin-barcode"
@@ -147,9 +148,9 @@ export default function PrintLabelBothPage() {
           format: "CODE128",
           displayValue: false,
           lineColor: "#000000",
-          height: 26,
+          height: 11,
           margin: 0,
-          width: 1.6,
+          width: 1.4,
         });
       }
 
@@ -265,11 +266,19 @@ export default function PrintLabelBothPage() {
             text-align: center;
           }
 
+          .bin-label-prefix {
+            font-size: 7pt;
+            font-weight: 600;
+            line-height: 1;
+            margin-bottom: 0.3mm;
+            letter-spacing: 0.8px;
+          }
+
           .bin-order {
-            font-size: 11pt;
+            font-size: 28pt;
             font-weight: 900;
-            line-height: 1.05;
-            margin-bottom: 1.2mm;
+            line-height: 1;
+            margin-bottom: 1mm;
             letter-spacing: 0.2px;
           }
 

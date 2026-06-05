@@ -996,10 +996,16 @@ export default function CutListPage() {
         }
         orderGroups.get(item.orderId)!.push(item);
       }
+      const latestCutTime = (group: CutListItem[]): number => {
+        let latest = new Date(group[0].orderCreatedAt).getTime();
+        for (const tag of group[0].orderTags) {
+          const t = new Date(tag).getTime();
+          if (!isNaN(t)) latest = Math.max(latest, t);
+        }
+        return latest;
+      };
       const sortedGroups = Array.from(orderGroups.values()).sort(
-        (a, b) =>
-          new Date(a[0].orderCreatedAt).getTime() -
-          new Date(b[0].orderCreatedAt).getTime(),
+        (a, b) => latestCutTime(b) - latestCutTime(a),
       );
       return sortedGroups.flat();
     }
@@ -1605,9 +1611,6 @@ export default function CutListPage() {
       ),
     );
 
-    const orderHadPrintedTag = first.orderTags.some(
-      (t) => t.toLowerCase() === "printed",
-    );
     const includeBin = true;
 
     const url = `/print-label-both?orderName=${encodeURIComponent(orderName)}&items=${itemsParam}&includeBin=${includeBin}&includeCut=true`;
@@ -1634,13 +1637,12 @@ export default function CutListPage() {
       const numericId = s.lineItemId.split("/").pop() || s.lineItemId;
       return `cut-by:${numericId}_${cutByName}`;
     });
-    const printedTag = orderHadPrintedTag ? [] : ["printed"];
     const hadPartialTag = first.orderTags.some(
       (t) => t.toLowerCase() === "partially picked",
     );
 
     if (pickedCount === totalCount) {
-      const tagsToAdd = ["picked", timestamp, ...swatchLineTags, ...cutByTags, ...printedTag];
+      const tagsToAdd = ["picked", timestamp, ...swatchLineTags, ...cutByTags];
       submitTagsRemove(orderId, ["partially picked"]);
       submitTagsAdd(orderId, tagsToAdd);
       setCutListItems((prev) =>
@@ -1668,7 +1670,6 @@ export default function CutListPage() {
         timestamp,
         ...swatchLineTags,
         ...cutByTags,
-        ...printedTag,
       ];
       submitTagsAdd(orderId, tagsToAdd);
       setCutListItems((prev) =>
@@ -1683,7 +1684,7 @@ export default function CutListPage() {
       );
       upsertOrderInPickedToday(orderId, tagsToAdd);
     } else {
-      const tagsToAdd = [...swatchLineTags, ...cutByTags, ...printedTag];
+      const tagsToAdd = [...swatchLineTags, ...cutByTags];
       submitTagsAdd(orderId, tagsToAdd);
       setCutListItems((prev) =>
         prev.map((i) =>
