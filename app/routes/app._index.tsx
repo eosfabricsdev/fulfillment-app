@@ -578,6 +578,22 @@ export default function CutListPage() {
     }
   }, [completionMessage]);
 
+  const noteModalRef = useRef<any>(null);
+
+  useEffect(() => {
+    const el = noteModalRef.current;
+    if (!el) return;
+    try {
+      if (noteModalContent) {
+        el.showOverlay?.();
+      } else {
+        el.hideOverlay?.();
+      }
+    } catch {
+      // ignore
+    }
+  }, [noteModalContent]);
+
   const [moveToCutListConfirm, setMoveToCutListConfirm] = useState<
     CutListItem[] | null
   >(null);
@@ -2561,13 +2577,7 @@ const cellStyle = {
       <s-modal
         id="order-note-modal"
         heading={`Note on Order ${noteModalContent?.orderName ?? ""}`}
-        ref={(el) => {
-          if (el && noteModalContent) {
-            el.showOverlay();
-          } else if (el && !noteModalContent) {
-            el.hideOverlay();
-          }
-        }}
+        ref={noteModalRef}
         onHide={() => setNoteModalContent(null)}
       >
         <s-box padding="base">
@@ -2576,7 +2586,10 @@ const cellStyle = {
         <s-button
           slot="primary-action"
           variant="primary"
-          onClick={() => setNoteModalContent(null)}
+          onClick={() => {
+            noteModalRef.current?.hideOverlay?.();
+            setNoteModalContent(null);
+          }}
         >
           Acknowledge
         </s-button>
