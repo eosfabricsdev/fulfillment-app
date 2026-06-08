@@ -66,6 +66,7 @@ type RawOrder = {
   createdAt: string;
   note: string | null;
   tags: string[];
+  displayFulfillmentStatus: string | null;
   customer: Customer;
   fulfillmentOrders: {
     nodes: FulfillmentOrder[];
@@ -98,6 +99,7 @@ type CutListItem = {
   fabricLength: string | null;
   colorCode: string | null;
   hasHold: boolean;
+  displayFulfillmentStatus: string | null;
   allLineItems: LineItem[];
   productImage: string | null;
   productImageAlt: string | null;
@@ -162,6 +164,7 @@ function toCutListItems(
         barcode: lineItem.variant?.barcode || null,
         binNumber,
         hasHold,
+        displayFulfillmentStatus: order.displayFulfillmentStatus ?? null,
         allLineItems,
         productImage:
           lineItem.variant?.image?.url ||
@@ -193,6 +196,7 @@ async function queryOrders(admin: any, query: string) {
             tags
             createdAt
             note
+            displayFulfillmentStatus
             customer {
               id
               displayName
@@ -396,6 +400,137 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return { ok: true };
   }
 
+  if (intent === "resolveSilkSubstitutes") {
+    const itemsJson = String(formData.get("items") || "[]");
+    let inputs: Array<{ productId: string; colorCode: string }> = [];
+    try {
+      inputs = JSON.parse(itemsJson);
+    } catch {
+      inputs = [];
+    }
+
+    const variantFields = `
+      sku
+      barcode
+      title
+      selectedOptions { name value }
+      product { id title }
+      colorCode: metafield(namespace: "custom", key: "color_code") { value }
+    `;
+
+    const cdcResp = await admin.graphql(
+      `#graphql
+      query CdcAnchor {
+        productVariants(first: 1, query: "sku:41031") {
+          nodes {
+            product {
+              id
+              title
+              variants(first: 250) {
+                nodes {
+                  ${variantFields}
+                }
+              }
+            }
+          }
+        }
+      }`,
+    );
+    const cdcJson = await cdcResp.json();
+    const cdcProduct =
+      cdcJson.data?.productVariants?.nodes?.[0]?.product ?? null;
+    const cdcVariants: any[] = cdcProduct?.variants?.nodes ?? [];
+
+    const uniqueProductIds = Array.from(
+      new Set(inputs.map((i) => i.productId).filter(Boolean)),
+    );
+    const productVariantsMap = new Map<string, any[]>();
+    for (const pid of uniqueProductIds) {
+      const resp = await admin.graphql(
+        `#graphql
+        query OrderedProduct($id: ID!) {
+          product(id: $id) {
+            id
+            title
+            variants(first: 250) {
+              nodes {
+                ${variantFields}
+              }
+            }
+          }
+        }`,
+        { variables: { id: pid } },
+      );
+      const json = await resp.json();
+      productVariantsMap.set(pid, json.data?.product?.variants?.nodes ?? []);
+    }
+
+    const findSwatch = (variants: any[], colorCode: string) =>
+      variants.find((v) => {
+        const fl = v.selectedOptions?.find(
+          (o: any) => o.name === "Fabric Length",
+        )?.value;
+        return (
+          fl === "Swatch Sample" && (v.colorCode?.value ?? null) === colorCode
+        );
+      }) ?? null;
+
+    const toPayload = (v: any) =>
+      v
+        ? {
+            productTitle: v.product?.title ?? "",
+            variantTitle: v.title ?? null,
+            sku: v.sku ?? "",
+            barcode: v.barcode ?? null,
+            colorCode: v.colorCode?.value ?? null,
+          }
+        : null;
+
+    const results = inputs.map(({ productId, colorCode }) => {
+      const subA = findSwatch(cdcVariants, colorCode);
+      const orderedVariants = productVariantsMap.get(productId) ?? [];
+      const subB = findSwatch(orderedVariants, "101");
+      return {
+        productId,
+        colorCode,
+        substituteA: toPayload(subA),
+        substituteB: toPayload(subB),
+      };
+    });
+
+    return { ok: true, results };
+  }
+
+  if (intent === "tagsUpdate") {
+    const removeTags = formData.getAll("removeTags").map(String);
+    const addTags = formData.getAll("addTags").map(String);
+    if (removeTags.length > 0) {
+      await admin.graphql(
+        `#graphql
+        mutation TagsRemove($id: ID!, $tags: [String!]!) {
+          tagsRemove(id: $id, tags: $tags) {
+            node { id }
+            userErrors { field message }
+          }
+        }`,
+        { variables: { id: orderId, tags: removeTags } },
+      );
+    }
+    if (addTags.length > 0) {
+      await admin.graphql(
+        `#graphql
+        mutation TagsAdd($id: ID!, $tags: [String!]!) {
+          tagsAdd(id: $id, tags: $tags) {
+            node { id }
+            userErrors { field message }
+          }
+        }`,
+        { variables: { id: orderId, tags: addTags } },
+      );
+    }
+    return { ok: true };
+  }
+
   return { ok: false };
 };
 
@@ -443,8 +578,10 @@ export default function CutListPage() {
     setPickedTodayItems(newPickedTodayItems);
     setLastUpdated(new Date());
 
+    const knownIds = new Set<string>();
     const persistedPicked = new Set<string>();
     for (const item of [...newCutListItems, ...newPickedTodayItems]) {
+      knownIds.add(item.lineItemId);
       const numericId = item.lineItemId.split("/").pop();
       if (!numericId) continue;
       const tagPrefix = `picked-line:${numericId}`.toLowerCase();
@@ -458,7 +595,10 @@ export default function CutListPage() {
       }
     }
     setPickedItems((prev) => {
-      const next = new Set(prev);
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (!knownIds.has(id)) next.add(id);
+      }
       persistedPicked.forEach((id) => next.add(id));
       return next;
     });
@@ -471,7 +611,10 @@ export default function CutListPage() {
       }
     }
     setPrintedLines((prev) => {
-      const next = new Set(prev);
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (!knownIds.has(id)) next.add(id);
+      }
       persistedPrinted.forEach((id) => next.add(id));
       return next;
     });
@@ -770,6 +913,20 @@ export default function CutListPage() {
     tagFetcher.submit(form, { method: "post" });
   }
 
+  function submitTagsUpdate(
+    orderId: string,
+    removeTags: string[],
+    addTags: string[],
+  ) {
+    if (removeTags.length === 0 && addTags.length === 0) return;
+    const form = new FormData();
+    form.append("intent", "tagsUpdate");
+    form.append("orderId", orderId);
+    removeTags.forEach((tag) => form.append("removeTags", tag));
+    addTags.forEach((tag) => form.append("addTags", tag));
+    tagFetcher.submit(form, { method: "post" });
+  }
+
   const effectiveCreatedAt = (item: CutListItem): number => {
     if (item.sku && skuAnchorTimes[item.sku] != null) {
       return skuAnchorTimes[item.sku];
@@ -865,13 +1022,36 @@ export default function CutListPage() {
     const rushOrderIds = new Set(
       items.filter((item) => isRushOrder(item.orderTags)).map((o) => o.orderId),
     );
-    const rushItems = items.filter((item) => rushOrderIds.has(item.orderId));
-    const nonRushItems = items.filter((item) => !rushOrderIds.has(item.orderId));
+    const rushSkus = new Set(
+      items
+        .filter((item) => rushOrderIds.has(item.orderId) && item.sku)
+        .map((item) => item.sku),
+    );
 
-    rushItems.sort((a, b) => effectiveCreatedAt(a) - effectiveCreatedAt(b));
+    const topItems = items.filter(
+      (item) => rushOrderIds.has(item.orderId) || rushSkus.has(item.sku),
+    );
+    const remainingItems = items.filter(
+      (item) => !rushOrderIds.has(item.orderId) && !rushSkus.has(item.sku),
+    );
 
-    const sortedNonRush = applyCustomerBatchingSort(nonRushItems);
-    return [...rushItems, ...sortedNonRush];
+    const topSkuGroups = new Map<string, CutListItem[]>();
+    for (const item of topItems) {
+      const key = item.sku || `__no_sku__${item.lineItemId}`;
+      if (!topSkuGroups.has(key)) topSkuGroups.set(key, []);
+      topSkuGroups.get(key)!.push(item);
+    }
+
+    const sortedTopGroups = Array.from(topSkuGroups.values()).map((group) => {
+      group.sort((a, b) => effectiveCreatedAt(a) - effectiveCreatedAt(b));
+      return group;
+    });
+    sortedTopGroups.sort(
+      (a, b) => effectiveCreatedAt(a[0]) - effectiveCreatedAt(b[0]),
+    );
+
+    const sortedRemaining = applyCustomerBatchingSort(remainingItems);
+    return [...sortedTopGroups.flat(), ...sortedRemaining];
   };
 
   const processRushItems = (items: CutListItem[]): CutListItem[] => {
@@ -932,6 +1112,107 @@ export default function CutListPage() {
     if (item.sku.toLowerCase().includes("swatch")) return true;
     if (item.fabricLength?.toLowerCase().includes("swatch sample")) return true;
     return false;
+  }
+
+  function isSilkSwatchNeedingSubstitute(item: CutListItem): boolean {
+    if (!isSwatch(item)) return false;
+    const title = item.productTitle?.toLowerCase() ?? "";
+    if (!title.includes("silk")) return false;
+    if (title.includes("crepe de chine")) return false;
+    if ((item.colorCode ?? "").trim() === "101") return false;
+    if (!item.colorCode || !item.productId) return false;
+    return true;
+  }
+
+  type SubstitutePayload = {
+    productTitle: string;
+    variantTitle: string | null;
+    sku: string;
+    barcode: string | null;
+    colorCode: string | null;
+  };
+
+  type SubstituteResult = {
+    productId: string;
+    colorCode: string;
+    substituteA: SubstitutePayload | null;
+    substituteB: SubstitutePayload | null;
+  };
+
+  async function resolveSilkSubstitutes(
+    items: CutListItem[],
+  ): Promise<Map<string, SubstituteResult>> {
+    const needs = items.filter(isSilkSwatchNeedingSubstitute);
+    if (needs.length === 0) return new Map();
+
+    const seen = new Set<string>();
+    const inputs: Array<{ productId: string; colorCode: string }> = [];
+    for (const it of needs) {
+      const key = `${it.productId}::${it.colorCode}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      inputs.push({ productId: it.productId, colorCode: it.colorCode! });
+    }
+
+    const form = new FormData();
+    form.append("intent", "resolveSilkSubstitutes");
+    form.append("items", JSON.stringify(inputs));
+
+    const resp = await fetch(window.location.pathname, {
+      method: "POST",
+      body: form,
+    });
+    const json: any = await resp.json().catch(() => null);
+    const results: SubstituteResult[] = json?.results ?? [];
+
+    const map = new Map<string, SubstituteResult>();
+    for (const r of results) {
+      map.set(`${r.productId}::${r.colorCode}`, r);
+    }
+    return map;
+  }
+
+  function expandSilkSwatchForPrint(
+    item: CutListItem,
+    substitutes: Map<string, SubstituteResult>,
+  ) {
+    const baseItem = {
+      productTitle: item.productTitle,
+      variantTitle: item.variantTitle,
+      quantity: item.quantity,
+      sku: item.sku,
+      barcode: item.barcode,
+      colorCode: item.colorCode || null,
+    };
+
+    if (!isSilkSwatchNeedingSubstitute(item)) return [baseItem];
+
+    const key = `${item.productId}::${item.colorCode}`;
+    const res = substitutes.get(key);
+    if (!res) return [baseItem];
+
+    const labels: typeof baseItem[] = [];
+    if (res.substituteA) {
+      labels.push({
+        productTitle: res.substituteA.productTitle,
+        variantTitle: res.substituteA.variantTitle,
+        quantity: item.quantity,
+        sku: res.substituteA.sku,
+        barcode: res.substituteA.barcode,
+        colorCode: res.substituteA.colorCode,
+      });
+    }
+    if (res.substituteB) {
+      labels.push({
+        productTitle: res.substituteB.productTitle,
+        variantTitle: res.substituteB.variantTitle,
+        quantity: item.quantity,
+        sku: res.substituteB.sku,
+        barcode: res.substituteB.barcode,
+        colorCode: res.substituteB.colorCode,
+      });
+    }
+    return labels.length > 0 ? labels : [baseItem];
   }
 
   function isItemCut(item: CutListItem): boolean {
@@ -1032,7 +1313,8 @@ export default function CutListPage() {
           (item.orderTags.some((t) => t.toLowerCase() === "picked") ||
             hasReadyToShipTag(item)) &&
           !item.hasHold &&
-          item.quantity > 0,
+          item.quantity > 0 &&
+          item.displayFulfillmentStatus !== "READY_FOR_PICKUP",
       );
       const orderGroups = new Map<string, CutListItem[]>();
       for (const item of readyItems) {
@@ -1160,6 +1442,7 @@ export default function CutListPage() {
           if (item.sku === VIRTUAL_SKU) return false;
           if (item.hasHold) return false;
           if (item.quantity === 0) return false;
+          if (item.displayFulfillmentStatus === "READY_FOR_PICKUP") return false;
           const orderFullyPicked = item.orderTags.some(
             (t) => t.toLowerCase() === "picked",
           );
@@ -1258,7 +1541,7 @@ export default function CutListPage() {
     });
   };
 
-  const openPrint = (
+  const openPrint = async (
     item: CutListItem,
     includeBin: boolean,
     options?: { skipWindow?: boolean; skipCut?: boolean },
@@ -1266,7 +1549,14 @@ export default function CutListPage() {
     const skipWindow = options?.skipWindow ?? false;
     const skipCut = options?.skipCut ?? false;
     const includeCut = !skipCut;
-    const url = `/print-label-both?orderName=${encodeURIComponent(item.orderName)}&productTitle=${encodeURIComponent(item.productTitle)}&variantTitle=${encodeURIComponent(item.variantTitle || "")}&quantity=${item.quantity}&sku=${encodeURIComponent(item.sku || "")}&barcode=${encodeURIComponent(item.barcode || "")}&colorCode=${encodeURIComponent(item.colorCode || "")}&includeBin=${includeBin}&includeCut=${includeCut}`;
+
+    const substitutes =
+      includeCut && isSilkSwatchNeedingSubstitute(item)
+        ? await resolveSilkSubstitutes([item])
+        : new Map<string, SubstituteResult>();
+    const expanded = expandSilkSwatchForPrint(item, substitutes);
+    const itemsParam = encodeURIComponent(JSON.stringify(expanded));
+    const url = `/print-label-both?orderName=${encodeURIComponent(item.orderName)}&items=${itemsParam}&includeBin=${includeBin}&includeCut=${includeCut}`;
 
     const orderItems = cutListItems.filter((i) => i.orderId === item.orderId);
     const pickedCount = orderItems.filter(
@@ -1287,8 +1577,7 @@ export default function CutListPage() {
 
     if (pickedCount === totalCount) {
       const tagsToAdd = ["picked", timestamp, lineItemTag, cutByTag, ...printedTag];
-      submitTagsRemove(item.orderId, ["partially picked"]);
-      submitTagsAdd(item.orderId, tagsToAdd);
+      submitTagsUpdate(item.orderId, ["partially picked"], tagsToAdd);
 
       setCutListItems((prev) =>
         prev.map((i) =>
@@ -1387,19 +1676,16 @@ export default function CutListPage() {
     }
   };
 
-  const reprintLabel = (item: CutListItem, mode: "bin" | "cut") => {
-    const params = new URLSearchParams({
-      orderName: item.orderName,
-      productTitle: item.productTitle,
-      variantTitle: item.variantTitle || "",
-      quantity: String(item.quantity),
-      sku: item.sku || "",
-      barcode: item.barcode || "",
-      colorCode: item.colorCode || "",
-      includeBin: mode === "bin" ? "true" : "false",
-      includeCut: mode === "cut" ? "true" : "false",
-    });
-    window.open(`/print-label-both?${params.toString()}`, "_blank");
+  const reprintLabel = async (item: CutListItem, mode: "bin" | "cut") => {
+    const includeCut = mode === "cut";
+    const substitutes =
+      includeCut && isSilkSwatchNeedingSubstitute(item)
+        ? await resolveSilkSubstitutes([item])
+        : new Map<string, SubstituteResult>();
+    const expanded = expandSilkSwatchForPrint(item, substitutes);
+    const itemsParam = encodeURIComponent(JSON.stringify(expanded));
+    const url = `/print-label-both?orderName=${encodeURIComponent(item.orderName)}&items=${itemsParam}&includeBin=${mode === "bin" ? "true" : "false"}&includeCut=${includeCut ? "true" : "false"}`;
+    window.open(url, "_blank");
   };
 
   const moveItemsToCutList = (items: CutListItem[]) => {
@@ -1460,12 +1746,7 @@ export default function CutListPage() {
     }
 
     const dedupedRemove = Array.from(new Set(tagsToRemove));
-    if (dedupedRemove.length > 0) {
-      submitTagsRemove(orderId, dedupedRemove);
-    }
-    if (tagsToAdd.length > 0) {
-      submitTagsAdd(orderId, tagsToAdd);
-    }
+    submitTagsUpdate(orderId, dedupedRemove, tagsToAdd);
 
     setPickedItems((prev) => {
       const next = new Set(prev);
@@ -1571,45 +1852,31 @@ export default function CutListPage() {
     setReadyToShipSelections(new Set());
   };
 
-  const reprintSwatchBundle = (swatches: CutListItem[]) => {
+  const reprintSwatchBundle = async (swatches: CutListItem[]) => {
     if (swatches.length === 0) return;
     const orderName = swatches[0].orderName;
-    const itemsParam = encodeURIComponent(
-      JSON.stringify(
-        swatches.map((s) => ({
-          productTitle: s.productTitle,
-          variantTitle: s.variantTitle,
-          quantity: s.quantity,
-          sku: s.sku,
-          barcode: s.barcode,
-          colorCode: s.colorCode || null,
-        })),
-      ),
+    const substitutes = await resolveSilkSubstitutes(swatches);
+    const expanded = swatches.flatMap((s) =>
+      expandSilkSwatchForPrint(s, substitutes),
     );
+    const itemsParam = encodeURIComponent(JSON.stringify(expanded));
     window.open(
       `/print-label-both?orderName=${encodeURIComponent(orderName)}&items=${itemsParam}&includeBin=true&includeCut=true`,
       "_blank",
     );
   };
 
-  const printSwatchBundle = (swatches: CutListItem[]) => {
+  const printSwatchBundle = async (swatches: CutListItem[]) => {
     if (swatches.length === 0) return;
     const first = swatches[0];
     const orderId = first.orderId;
     const orderName = first.orderName;
 
-    const itemsParam = encodeURIComponent(
-      JSON.stringify(
-        swatches.map((s) => ({
-          productTitle: s.productTitle,
-          variantTitle: s.variantTitle,
-          quantity: s.quantity,
-          sku: s.sku,
-          barcode: s.barcode,
-          colorCode: s.colorCode || null,
-        })),
-      ),
+    const substitutes = await resolveSilkSubstitutes(swatches);
+    const expanded = swatches.flatMap((s) =>
+      expandSilkSwatchForPrint(s, substitutes),
     );
+    const itemsParam = encodeURIComponent(JSON.stringify(expanded));
 
     const includeBin = true;
 
@@ -1643,8 +1910,7 @@ export default function CutListPage() {
 
     if (pickedCount === totalCount) {
       const tagsToAdd = ["picked", timestamp, ...swatchLineTags, ...cutByTags];
-      submitTagsRemove(orderId, ["partially picked"]);
-      submitTagsAdd(orderId, tagsToAdd);
+      submitTagsUpdate(orderId, ["partially picked"], tagsToAdd);
       setCutListItems((prev) =>
         prev.map((i) =>
           i.orderId === orderId
