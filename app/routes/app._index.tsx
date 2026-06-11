@@ -618,6 +618,24 @@ export default function CutListPage() {
       persistedPrinted.forEach((id) => next.add(id));
       return next;
     });
+
+    const persistedSkipped = new Set<string>();
+    for (const item of newCutListItems) {
+      const numericId = item.lineItemId.split("/").pop();
+      if (!numericId) continue;
+      const tag = `skipped:${numericId}`.toLowerCase();
+      if (item.orderTags.some((t) => t.toLowerCase() === tag)) {
+        persistedSkipped.add(item.lineItemId);
+      }
+    }
+    setSkippedItems((prev) => {
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (!knownIds.has(id)) next.add(id);
+      }
+      persistedSkipped.forEach((id) => next.add(id));
+      return next;
+    });
   }, [data.cutListItems, data.pickedTodayItems]);
 
   const [pageInfo] = useState<any>(data.pageInfo || null);
@@ -625,6 +643,93 @@ export default function CutListPage() {
   const [error, setError] = useState<string | null>(null);
   const [pickedItems, setPickedItems] = useState<Set<string>>(new Set());
   const [printedLines, setPrintedLines] = useState<Set<string>>(new Set());
+  const [skippedItems, setSkippedItems] = useState<Set<string>>(new Set());
+
+  type ActionEntry = {
+    id: string;
+    type: "skip" | "unskip" | "print" | "printBundle";
+    description: string;
+    lineItemIds: string[];
+    orderId: string;
+    includeBin?: boolean;
+  };
+  const [undoStack, setUndoStack] = useState<ActionEntry[]>([]);
+  const [redoStack, setRedoStack] = useState<ActionEntry[]>([]);
+
+  const pushAction = (entry: ActionEntry) => {
+    setUndoStack((prev) => [...prev.slice(-19), entry]);
+    setRedoStack([]);
+  };
+
+  const findItemById = (lineItemId: string): CutListItem | undefined => {
+    return (
+      cutListItems.find((i) => i.lineItemId === lineItemId) ??
+      pickedTodayItems.find((i) => i.lineItemId === lineItemId)
+    );
+  };
+
+  const undoLastAction = () => {
+    if (undoStack.length === 0) return;
+    const action = undoStack[undoStack.length - 1];
+    const items = action.lineItemIds
+      .map((id) => findItemById(id))
+      .filter((i): i is CutListItem => !!i);
+
+    if (items.length === 0) {
+      setUndoStack((prev) => prev.slice(0, -1));
+      return;
+    }
+
+    switch (action.type) {
+      case "skip":
+        unskipItem(items[0], { fromHistory: true });
+        break;
+      case "unskip":
+        skipItem(items[0], { fromHistory: true });
+        break;
+      case "print":
+      case "printBundle":
+        moveItemsToCutList(items);
+        break;
+    }
+
+    setUndoStack((prev) => prev.slice(0, -1));
+    setRedoStack((prev) => [...prev, action]);
+  };
+
+  const redoLastAction = () => {
+    if (redoStack.length === 0) return;
+    const action = redoStack[redoStack.length - 1];
+    const items = action.lineItemIds
+      .map((id) => findItemById(id))
+      .filter((i): i is CutListItem => !!i);
+
+    if (items.length === 0) {
+      setRedoStack((prev) => prev.slice(0, -1));
+      return;
+    }
+
+    switch (action.type) {
+      case "skip":
+        skipItem(items[0], { fromHistory: true });
+        break;
+      case "unskip":
+        unskipItem(items[0], { fromHistory: true });
+        break;
+      case "print":
+        openPrint(items[0], action.includeBin ?? true, {
+          skipWindow: true,
+          fromHistory: true,
+        });
+        break;
+      case "printBundle":
+        printSwatchBundle(items, { fromHistory: true });
+        break;
+    }
+
+    setRedoStack((prev) => prev.slice(0, -1));
+    setUndoStack((prev) => [...prev, action]);
+  };
   const [readyToPrint, setReadyToPrint] = useState<Set<string>>(new Set());
   const [employeeName] = useState<string>(data.employeeName || "Unknown");
   const [lastUpdated, setLastUpdated] = useState<Date>(new Date());
@@ -858,23 +963,38 @@ export default function CutListPage() {
     return () => clearInterval(timestampInterval);
   }, [lastUpdated]);
 
+  const revalidatorRef = useRef(revalidator);
+  revalidatorRef.current = revalidator;
+  const showProductCountModalRef = useRef(showProductCountModal);
+  showProductCountModalRef.current = showProductCountModal;
+  const previewImageRef = useRef(previewImage);
+  previewImageRef.current = previewImage;
+
   useEffect(() => {
     const refreshInterval = setInterval(() => {
-      const activeEl = document.activeElement as HTMLElement | null;
-      const isTyping =
-        activeEl?.tagName === "INPUT" ||
-        activeEl?.tagName === "TEXTAREA" ||
+      const activeEl = document.activeElement as
+        | HTMLInputElement
+        | HTMLTextAreaElement
+        | HTMLElement
+        | null;
+      const isInputElement =
+        activeEl?.tagName === "INPUT" || activeEl?.tagName === "TEXTAREA";
+      const hasText =
+        isInputElement &&
+        ((activeEl as HTMLInputElement).value?.length ?? 0) > 0;
+      const isContentEditable =
         activeEl?.getAttribute("contenteditable") === "true";
+      const isTyping = hasText || isContentEditable;
 
       if (isTyping) return;
-      if (revalidator.state !== "idle") return;
-      if (showProductCountModal || !!previewImage) return;
+      if (revalidatorRef.current.state !== "idle") return;
+      if (showProductCountModalRef.current || !!previewImageRef.current) return;
 
-      revalidator.revalidate();
+      revalidatorRef.current.revalidate();
     }, 30000);
 
     return () => clearInterval(refreshInterval);
-  }, [revalidator, showProductCountModal, previewImage]);
+  }, []);
 
   useEffect(() => {
     const onVisible = () => {
@@ -1096,6 +1216,22 @@ export default function CutListPage() {
     return date.toLocaleString();
   };
 
+  function formatEasternTagTimestamp(date: Date = new Date()): string {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+      timeZoneName: "short",
+    }).formatToParts(date);
+    const get = (type: string) =>
+      parts.find((p) => p.type === type)?.value ?? "";
+    return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")} ${get("dayPeriod")} ${get("timeZoneName")}`;
+  }
+
   function isRushOrder(orderTags: string[]): boolean {
     return orderTags.some((tag) => tag.toLowerCase() === "rush");
   }
@@ -1105,6 +1241,19 @@ export default function CutListPage() {
     if (!numericId) return false;
     const tag = `ready-to-ship:${numericId}`.toLowerCase();
     return item.orderTags.some((t) => t.toLowerCase() === tag);
+  }
+
+  function hasSkippedTag(item: CutListItem): boolean {
+    const numericId = item.lineItemId.split("/").pop();
+    if (!numericId) return false;
+    const tag = `skipped:${numericId}`.toLowerCase();
+    return item.orderTags.some((t) => t.toLowerCase() === tag);
+  }
+
+  function skippedTagFor(item: CutListItem): string | null {
+    const numericId = item.lineItemId.split("/").pop();
+    if (!numericId) return null;
+    return `skipped:${numericId}`;
   }
 
   function isSwatch(item: CutListItem): boolean {
@@ -1230,6 +1379,74 @@ export default function CutListPage() {
     });
   }
 
+  const skipItem = (item: CutListItem, options?: { fromHistory?: boolean }) => {
+    const tag = skippedTagFor(item);
+    if (!tag) return;
+    submitTagsUpdate(item.orderId, [], [tag]);
+    setCutListItems((prev) =>
+      prev.map((i) =>
+        i.lineItemId === item.lineItemId
+          ? { ...i, orderTags: Array.from(new Set([...i.orderTags, tag])) }
+          : i,
+      ),
+    );
+    setSkippedItems((prev) => new Set(prev).add(item.lineItemId));
+
+    if (activeLineId === item.lineItemId) {
+      const itemsNow = getFilteredItems();
+      const currentIndex = itemsNow.findIndex(
+        (i) => i.lineItemId === item.lineItemId,
+      );
+      const nextItem = itemsNow[currentIndex + 1];
+      if (nextItem) {
+        setActiveLineId(nextItem.lineItemId);
+      }
+    }
+
+    if (!options?.fromHistory) {
+      pushAction({
+        id: `${Date.now()}-${item.lineItemId}`,
+        type: "skip",
+        description: `Skip — ${item.orderName} ${item.sku || ""}`.trim(),
+        lineItemIds: [item.lineItemId],
+        orderId: item.orderId,
+      });
+    }
+  };
+
+  const unskipItem = (item: CutListItem, options?: { fromHistory?: boolean }) => {
+    const tag = skippedTagFor(item);
+    if (!tag) return;
+    const tagLower = tag.toLowerCase();
+    submitTagsUpdate(item.orderId, [tag], []);
+    setCutListItems((prev) =>
+      prev.map((i) =>
+        i.lineItemId === item.lineItemId
+          ? {
+              ...i,
+              orderTags: i.orderTags.filter(
+                (t) => t.toLowerCase() !== tagLower,
+              ),
+            }
+          : i,
+      ),
+    );
+    setSkippedItems((prev) => {
+      const next = new Set(prev);
+      next.delete(item.lineItemId);
+      return next;
+    });
+
+    if (!options?.fromHistory) {
+      pushAction({
+        id: `${Date.now()}-${item.lineItemId}`,
+        type: "unskip",
+        description: `Unskip — ${item.orderName} ${item.sku || ""}`.trim(),
+        lineItemIds: [item.lineItemId],
+        orderId: item.orderId,
+      });
+    }
+  };
 
   const getPickedByName = (item: CutListItem): string => {
     const numericId = item.lineItemId.split("/").pop();
@@ -1331,49 +1548,69 @@ export default function CutListPage() {
       return sortedGroups.flat();
     }
 
-    const allItems = applyRushFirstSort(cutListItemsVisible);
+    const workingItems = cutListItemsVisible.filter(
+      (item) => !skippedItems.has(item.lineItemId),
+    );
+    const heldItems = cutListItemsVisible.filter((item) =>
+      skippedItems.has(item.lineItemId),
+    );
+
+    const applySkippedSort = (items: CutListItem[]): CutListItem[] => {
+      const skuGroups = new Map<string, CutListItem[]>();
+      for (const item of items) {
+        const key = item.sku || `__no_sku__${item.lineItemId}`;
+        if (!skuGroups.has(key)) skuGroups.set(key, []);
+        skuGroups.get(key)!.push(item);
+      }
+      const sortedGroups = Array.from(skuGroups.values()).map((group) => {
+        group.sort(
+          (a, b) =>
+            new Date(a.orderCreatedAt).getTime() -
+            new Date(b.orderCreatedAt).getTime(),
+        );
+        return group;
+      });
+      sortedGroups.sort(
+        (a, b) =>
+          new Date(a[0].orderCreatedAt).getTime() -
+          new Date(b[0].orderCreatedAt).getTime(),
+      );
+      return sortedGroups.flat();
+    };
+
+    const sortedHeld = applySkippedSort(heldItems);
+    const allItems = applyRushFirstSort(workingItems);
+
+    const buildStrictOrderMap = () => {
+      const fullOrderMap = new Map<string, CutListItem[]>();
+      for (const item of cutListItems) {
+        if (item.sku === VIRTUAL_SKU) continue;
+        if (hasReadyToShipTag(item)) continue;
+        if (!fullOrderMap.has(item.orderId)) fullOrderMap.set(item.orderId, []);
+        fullOrderMap.get(item.orderId)!.push(item);
+      }
+      return fullOrderMap;
+    };
 
     if (currentFilter === "rollEnds") {
+      const fullOrderMap = buildStrictOrderMap();
       const rollEndOrders = new Set<string>();
-      const orderMap = new Map<string, CutListItem[]>();
-
-      allItems.forEach((item) => {
-        if (!orderMap.has(item.orderId)) {
-          orderMap.set(item.orderId, []);
-        }
-        orderMap.get(item.orderId)!.push(item);
-      });
-
-      orderMap.forEach((items, orderId) => {
+      fullOrderMap.forEach((items, orderId) => {
         const allAreYardPiece = items.every((item) =>
           item.variantTitle?.includes("Yard Piece"),
         );
-        if (allAreYardPiece) {
-          rollEndOrders.add(orderId);
-        }
+        if (allAreYardPiece) rollEndOrders.add(orderId);
       });
-
       return allItems.filter((item) => rollEndOrders.has(item.orderId));
     }
 
     if (currentFilter === "swatches") {
+      const fullOrderMap = buildStrictOrderMap();
       const swatchOrders = new Set<string>();
-      const orderMap = new Map<string, CutListItem[]>();
-
-      allItems.forEach((item) => {
-        if (!orderMap.has(item.orderId)) {
-          orderMap.set(item.orderId, []);
-        }
-        orderMap.get(item.orderId)!.push(item);
-      });
-
-      orderMap.forEach((items, orderId) => {
+      fullOrderMap.forEach((items, orderId) => {
         const allAreSwatches = items.every((item) => isSwatch(item));
-        if (allAreSwatches) {
-          swatchOrders.add(orderId);
-        }
+        if (allAreSwatches) swatchOrders.add(orderId);
       });
-
       return allItems.filter((item) => swatchOrders.has(item.orderId));
     }
 
@@ -1389,7 +1626,7 @@ export default function CutListPage() {
       );
     }
 
-    return allItems;
+    return [...sortedHeld, ...allItems];
   };
 
   const getSummaryStats = () => {
@@ -1397,7 +1634,13 @@ export default function CutListPage() {
       (item) => item.sku !== VIRTUAL_SKU && !hasReadyToShipTag(item),
     );
     const uniqueOrders = new Set(filteredCutListItems.map((i) => i.orderId));
-    const totalCuts = filteredCutListItems.length;
+    const uncutItems = filteredCutListItems.filter(
+      (item) => !pickedItems.has(item.lineItemId),
+    );
+    const totalCuts = uncutItems.reduce(
+      (sum, item) => sum + Math.max(1, item.quantity),
+      0,
+    );
 
     const orderMap = new Map<string, CutListItem[]>();
     filteredCutListItems.forEach((item) => {
@@ -1414,9 +1657,7 @@ export default function CutListPage() {
       const allAreYardPiece = items.every((item) =>
         item.variantTitle?.includes("Yard Piece"),
       );
-      const allAreSwatches = items.every((item) =>
-        item.variantTitle?.includes("Swatch Sample"),
-      );
+      const allAreSwatches = items.every((item) => isSwatch(item));
 
       if (allAreYardPiece) rollEndsOnlyCount++;
       if (allAreSwatches) swatchesOnlyCount++;
@@ -1544,11 +1785,23 @@ export default function CutListPage() {
   const openPrint = async (
     item: CutListItem,
     includeBin: boolean,
-    options?: { skipWindow?: boolean; skipCut?: boolean },
+    options?: { skipWindow?: boolean; skipCut?: boolean; fromHistory?: boolean },
   ) => {
     const skipWindow = options?.skipWindow ?? false;
     const skipCut = options?.skipCut ?? false;
+    const fromHistory = options?.fromHistory ?? false;
     const includeCut = !skipCut;
+
+    if (!fromHistory && !skipCut) {
+      pushAction({
+        id: `${Date.now()}-${item.lineItemId}`,
+        type: "print",
+        description: `Print — ${item.orderName} ${item.sku || ""}`.trim(),
+        lineItemIds: [item.lineItemId],
+        orderId: item.orderId,
+        includeBin,
+      });
+    }
 
     const substitutes =
       includeCut && isSilkSwatchNeedingSubstitute(item)
@@ -1563,7 +1816,7 @@ export default function CutListPage() {
       (i) => pickedItems.has(i.lineItemId) || i.lineItemId === item.lineItemId,
     ).length;
     const totalCount = orderItems.filter((i) => i.sku !== VIRTUAL_SKU).length;
-    const timestamp = new Date().toISOString();
+    const timestamp = formatEasternTagTimestamp();
     const numericLineId = item.lineItemId.split("/").pop() || item.lineItemId;
     const lineItemTag = item.sku
       ? `picked-line:${numericLineId}_${item.sku}`
@@ -1700,6 +1953,7 @@ export default function CutListPage() {
       const pickedLinePrefix = `picked-line:${numericId}`.toLowerCase();
       const readyToShipExact = `ready-to-ship:${numericId}`.toLowerCase();
       const cutByPrefix = `cut-by:${numericId}_`.toLowerCase();
+      const skippedExact = `skipped:${numericId}`.toLowerCase();
       for (const tag of orderTags) {
         const lower = tag.toLowerCase();
         if (
@@ -1712,6 +1966,9 @@ export default function CutListPage() {
           tagsToRemove.push(tag);
         }
         if (lower.startsWith(cutByPrefix)) {
+          tagsToRemove.push(tag);
+        }
+        if (lower === skippedExact) {
           tagsToRemove.push(tag);
         }
       }
@@ -1866,11 +2123,25 @@ export default function CutListPage() {
     );
   };
 
-  const printSwatchBundle = async (swatches: CutListItem[]) => {
+  const printSwatchBundle = async (
+    swatches: CutListItem[],
+    options?: { fromHistory?: boolean },
+  ) => {
     if (swatches.length === 0) return;
     const first = swatches[0];
     const orderId = first.orderId;
     const orderName = first.orderName;
+
+    if (!options?.fromHistory) {
+      pushAction({
+        id: `${Date.now()}-${first.lineItemId}`,
+        type: "printBundle",
+        description: `Print Bundle — ${orderName} (${swatches.length} swatches)`,
+        lineItemIds: swatches.map((s) => s.lineItemId),
+        orderId,
+        includeBin: true,
+      });
+    }
 
     const substitutes = await resolveSilkSubstitutes(swatches);
     const expanded = swatches.flatMap((s) =>
@@ -1892,7 +2163,7 @@ export default function CutListPage() {
     const totalCount = orderItemsInList.filter(
       (i) => i.sku !== VIRTUAL_SKU,
     ).length;
-    const timestamp = new Date().toISOString();
+    const timestamp = formatEasternTagTimestamp();
     const swatchLineTags = swatches.map((s) => {
       const numericId = s.lineItemId.split("/").pop() || s.lineItemId;
       return s.sku
@@ -2017,6 +2288,15 @@ export default function CutListPage() {
 
   return (
     <s-page heading="Fulfillment Cut List" inlineSize="large">
+      <div
+        style={{
+          position: "sticky",
+          top: 0,
+          zIndex: 10,
+          background: "#fff",
+          paddingBottom: "0.5rem",
+        }}
+      >
       <s-section>
         <s-stack gap="base" direction="inline">
           <s-box
@@ -2075,7 +2355,7 @@ export default function CutListPage() {
           >
             <s-clickable onClick={() => setCurrentFilter("rollEnds")}>
               <s-stack gap="small">
-                <s-text color="subdued">Roll Ends Only</s-text>
+                <s-text color="subdued">Roll Ends Only Orders</s-text>
                 <s-text type="strong">{stats.rollEndsOnly}</s-text>
               </s-stack>
             </s-clickable>
@@ -2090,7 +2370,7 @@ export default function CutListPage() {
           >
             <s-clickable onClick={() => setCurrentFilter("swatches")}>
               <s-stack gap="small">
-                <s-text color="subdued">Swatches Only</s-text>
+                <s-text color="subdued">Swatches Only Orders</s-text>
                 <s-text type="strong">{stats.swatchesOnly}</s-text>
               </s-stack>
             </s-clickable>
@@ -2208,8 +2488,41 @@ export default function CutListPage() {
               <s-text type="strong">{secondsSinceUpdate} seconds ago</s-text>
             </s-stack>
           </s-box>
+
+          <s-box
+            padding="base"
+            background="base"
+            borderWidth="base"
+            borderColor="base"
+            borderRadius="base"
+          >
+            <s-stack gap="small">
+              <s-stack gap="small" direction="inline">
+                <s-button
+                  variant="tertiary"
+                  disabled={undoStack.length === 0}
+                  onClick={undoLastAction}
+                >
+                  ↶ Undo
+                </s-button>
+                <s-button
+                  variant="tertiary"
+                  disabled={redoStack.length === 0}
+                  onClick={redoLastAction}
+                >
+                  Redo ↷
+                </s-button>
+              </s-stack>
+              <s-text color="subdued">
+                {undoStack.length > 0
+                  ? `Last: ${undoStack[undoStack.length - 1].description}`
+                  : "No recent action"}
+              </s-text>
+            </s-stack>
+          </s-box>
         </s-stack>
       </s-section>
+      </div>
 
       {(currentFilter === "pickedToday" ||
         currentFilter === "rush" ||
@@ -2341,9 +2654,19 @@ const showOrderGroupBorder =
   index > 0 &&
   filteredItems[index - 1]?.orderId !== item.orderId;
 
+const isHeldRow = skippedItems.has(item.lineItemId);
+const prevWasHeld =
+  index > 0 &&
+  skippedItems.has(filteredItems[index - 1]?.lineItemId ?? "");
+const isFirstWorkingRow = !isHeldRow && prevWasHeld;
+
 const cellStyle = {
   background: isActive ? "strong" : multipleGroupBackground,
-  borderTop: showOrderGroupBorder ? "4px solid #1f1f1f" : undefined,
+  borderTop: isFirstWorkingRow
+    ? "6px solid #d97706"
+    : showOrderGroupBorder
+    ? "4px solid #1f1f1f"
+    : undefined,
 };
 
                 return (
@@ -2354,7 +2677,12 @@ const cellStyle = {
 <s-table-cell
   style={cellStyle}
 >
-                      {isActive && <s-badge tone="success">✓</s-badge>}
+                      <s-stack gap="small">
+                        {isHeldRow && (
+                          <s-badge tone="warning">Held</s-badge>
+                        )}
+                        {isActive && <s-badge tone="success">✓</s-badge>}
+                      </s-stack>
                     </s-table-cell>
 
                     <s-table-cell
@@ -2478,7 +2806,13 @@ const cellStyle = {
                       >
                         <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
                           {isBundleRow ? (
-                            <s-text>{swatchesForOrder.length} swatches</s-text>
+                            <s-text>
+                              {swatchesForOrder.reduce(
+                                (sum, s) => sum + Math.max(1, s.quantity),
+                                0,
+                              )}{" "}
+                              swatches
+                            </s-text>
                           ) : !item.variantTitle?.includes("By the Yard") &&
                           item.quantity > 1 ? (
                             <s-badge tone="critical">⚠️ {item.quantity} units</s-badge>
@@ -2707,6 +3041,22 @@ const cellStyle = {
                           <s-text color="subdued">Click to activate</s-text>
                         </s-clickable>
                       )}
+
+                      {currentFilter !== "pickedToday" &&
+                        currentFilter !== "readyToShip" &&
+                        !printedLines.has(item.lineItemId) && (
+                          <div style={{ marginTop: "0.5rem" }}>
+                            <s-clickable
+                              onClick={() =>
+                                isHeldRow ? unskipItem(item) : skipItem(item)
+                              }
+                            >
+                              <s-badge tone={isHeldRow ? "info" : "caution"}>
+                                {isHeldRow ? "Unskip" : "Skip"}
+                              </s-badge>
+                            </s-clickable>
+                          </div>
+                        )}
                     </s-table-cell>
 
 <s-table-cell
