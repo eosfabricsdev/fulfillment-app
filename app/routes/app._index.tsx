@@ -465,15 +465,21 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       productVariantsMap.set(pid, json.data?.product?.variants?.nodes ?? []);
     }
 
-    const findSwatch = (variants: any[], colorCode: string) =>
-      variants.find((v) => {
-        const fl = v.selectedOptions?.find(
-          (o: any) => o.name === "Fabric Length",
-        )?.value;
-        return (
-          fl === "Swatch Sample" && (v.colorCode?.value ?? null) === colorCode
-        );
-      }) ?? null;
+    const norm = (s: string | null | undefined) =>
+      (s ?? "").trim().toLowerCase();
+    const findSwatch = (variants: any[], colorCode: string) => {
+      const target = norm(colorCode);
+      return (
+        variants.find((v) => {
+          const flOpt = v.selectedOptions?.find(
+            (o: any) => norm(o.name) === "fabric length",
+          );
+          const fl = norm(flOpt?.value);
+          const vc = norm(v.colorCode?.value);
+          return fl === "swatch sample" && vc === target;
+        }) ?? null
+      );
+    };
 
     const toPayload = (v: any) =>
       v
@@ -645,6 +651,15 @@ export default function CutListPage() {
   const [printedLines, setPrintedLines] = useState<Set<string>>(new Set());
   const [skippedItems, setSkippedItems] = useState<Set<string>>(new Set());
 
+  type RushAlert = {
+    orderId: string;
+    orderName: string;
+    itemCount: number;
+    skus: string[];
+  };
+  const [newRushAlerts, setNewRushAlerts] = useState<RushAlert[]>([]);
+  const seenRushOrderIdsRef = useRef<Set<string> | null>(null);
+
   type ActionEntry = {
     id: string;
     type: "skip" | "unskip" | "print" | "printBundle";
@@ -744,6 +759,7 @@ export default function CutListPage() {
     | "multiple"
     | "hold"
     | "readyToShip"
+    | "localPickup"
   >("all");
   const [pickedTodayItems, setPickedTodayItems] = useState<CutListItem[]>(
     data.pickedTodayItems || [],
@@ -890,6 +906,99 @@ export default function CutListPage() {
   }, [skuAnchorTimes]);
 
   useEffect(() => {
+    const currentRush = cutListItems.filter(
+      (item) =>
+        isRushOrder(item.orderTags) &&
+        !hasReadyToShipTag(item) &&
+        !pickedItems.has(item.lineItemId),
+    );
+    const currentRushOrderIds = new Set(currentRush.map((i) => i.orderId));
+
+    if (seenRushOrderIdsRef.current === null) {
+      seenRushOrderIdsRef.current = currentRushOrderIds;
+      return;
+    }
+
+    const seen = seenRushOrderIdsRef.current;
+    const newOrders = currentRush.filter((i) => !seen.has(i.orderId));
+    if (newOrders.length === 0) return;
+
+    const grouped = new Map<string, CutListItem[]>();
+    for (const item of newOrders) {
+      if (!grouped.has(item.orderId)) grouped.set(item.orderId, []);
+      grouped.get(item.orderId)!.push(item);
+    }
+
+    const newAlerts: RushAlert[] = [];
+    grouped.forEach((items, orderId) => {
+      const skus = Array.from(
+        new Set(items.map((i) => i.sku).filter((s): s is string => !!s)),
+      );
+      newAlerts.push({
+        orderId,
+        orderName: items[0].orderName,
+        itemCount: items.length,
+        skus,
+      });
+    });
+
+    setNewRushAlerts((prev) => {
+      const existing = new Set(prev.map((a) => a.orderId));
+      return [...prev, ...newAlerts.filter((a) => !existing.has(a.orderId))];
+    });
+
+    const updatedSeen = new Set(seen);
+    newOrders.forEach((i) => updatedSeen.add(i.orderId));
+    seenRushOrderIdsRef.current = updatedSeen;
+  }, [cutListItems, pickedItems]);
+
+  useEffect(() => {
+    if (newRushAlerts.length === 0) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const dismissedNumericIds = new Set<string>();
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            const orderIdNum = (entry.target as HTMLElement).getAttribute(
+              "data-rush-order-id",
+            );
+            if (orderIdNum) dismissedNumericIds.add(orderIdNum);
+          }
+        });
+        if (dismissedNumericIds.size > 0) {
+          setNewRushAlerts((prev) =>
+            prev.filter(
+              (a) => !dismissedNumericIds.has(a.orderId.split("/").pop() ?? ""),
+            ),
+          );
+        }
+      },
+      { threshold: 0 },
+    );
+
+    const attach = () => {
+      const activeOrderIds = new Set(
+        newRushAlerts.map((a) => a.orderId.split("/").pop()).filter(Boolean),
+      );
+      activeOrderIds.forEach((orderIdNum) => {
+        const els = document.querySelectorAll(
+          `[data-rush-order-id="${orderIdNum}"]`,
+        );
+        els.forEach((el) => observer.observe(el));
+      });
+    };
+
+    attach();
+    const raf = requestAnimationFrame(attach);
+
+    return () => {
+      cancelAnimationFrame(raf);
+      observer.disconnect();
+    };
+  }, [newRushAlerts]);
+
+  useEffect(() => {
     if (!activeLineId) return;
     const activeItem = cutListItems.find(
       (i) => i.lineItemId === activeLineId,
@@ -942,6 +1051,33 @@ export default function CutListPage() {
   }, [activeLineId]);
 
   useEffect(() => {
+    if (!activeLineId) return;
+    const activeItem = cutListItems.find(
+      (i) => i.lineItemId === activeLineId,
+    );
+    if (!activeItem) return;
+    if (!activeItem.sku) return;
+    if (activeItem.sku === VIRTUAL_SKU) return;
+    if (isSwatch(activeItem)) return;
+    const activeSku = activeItem.sku;
+
+    setReadyToPrint((prev) => {
+      if (prev.size === 0) return prev;
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        const other = cutListItems.find((i) => i.lineItemId === id);
+        if (!other || other.sku === activeSku) {
+          next.add(id);
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [activeLineId, cutListItems]);
+
+  useEffect(() => {
     if (tagFetcher.state === "idle" && tagFetcher.data?.ok) {
       // no-op; optimistic UI is already updating local state
     }
@@ -986,10 +1122,22 @@ export default function CutListPage() {
         activeEl?.getAttribute("contenteditable") === "true";
       const isTyping = hasText || isContentEditable;
 
+      console.log("[refresh] tick", {
+        activeTag: activeEl?.tagName,
+        activeValue: isInputElement
+          ? (activeEl as HTMLInputElement).value?.slice(0, 20)
+          : undefined,
+        isTyping,
+        state: revalidatorRef.current.state,
+        modal: showProductCountModalRef.current,
+        preview: !!previewImageRef.current,
+      });
+
       if (isTyping) return;
       if (revalidatorRef.current.state !== "idle") return;
       if (showProductCountModalRef.current || !!previewImageRef.current) return;
 
+      console.log("[refresh] calling revalidate");
       revalidatorRef.current.revalidate();
     }, 30000);
 
@@ -1291,7 +1439,21 @@ export default function CutListPage() {
   async function resolveSilkSubstitutes(
     items: CutListItem[],
   ): Promise<Map<string, SubstituteResult>> {
+    console.log(
+      "[silk] resolveSilkSubstitutes called with items",
+      items.map((i) => ({
+        lineItemId: i.lineItemId,
+        productTitle: i.productTitle,
+        variantTitle: i.variantTitle,
+        sku: i.sku,
+        productId: i.productId,
+        colorCode: i.colorCode,
+        isSwatch: isSwatch(i),
+        needsSubstitute: isSilkSwatchNeedingSubstitute(i),
+      })),
+    );
     const needs = items.filter(isSilkSwatchNeedingSubstitute);
+    console.log("[silk] items needing substitute", needs.length);
     if (needs.length === 0) return new Map();
 
     const seen = new Set<string>();
@@ -1313,6 +1475,8 @@ export default function CutListPage() {
     });
     const json: any = await resp.json().catch(() => null);
     const results: SubstituteResult[] = json?.results ?? [];
+    console.log("[silk] resolver inputs", inputs);
+    console.log("[silk] resolver results", results);
 
     const map = new Map<string, SubstituteResult>();
     for (const r of results) {
@@ -1520,6 +1684,13 @@ export default function CutListPage() {
       return applyCustomerOnlySort(multipleItems);
     }
 
+    if (currentFilter === "localPickup") {
+      const localPickupItems = cutListItemsVisible.filter((item) =>
+        item.orderTags.some((t) => t.toLowerCase() === "local pickup"),
+      );
+      return applyRushFirstSort(localPickupItems);
+    }
+
     if (currentFilter === "hold") {
       return applyCustomerOnlySort(holdItems);
     }
@@ -1696,6 +1867,14 @@ export default function CutListPage() {
       isSwatch(item),
     ).length;
 
+    const localPickupOrders = new Set(
+      filteredCutListItems
+        .filter((item) =>
+          item.orderTags.some((t) => t.toLowerCase() === "local pickup"),
+        )
+        .map((item) => item.orderId),
+    );
+
     return {
       rushOrders: rushOrders.length,
       ordersCutLog: uniqueCutLogOrders.size,
@@ -1706,6 +1885,7 @@ export default function CutListPage() {
       swatchesOnly: swatchesOnlyCount,
       totalSwatches: totalSwatchesCount,
       readyToShip: readyToShipOrders.size,
+      localPickup: localPickupOrders.size,
     };
   };
 
@@ -2298,7 +2478,13 @@ export default function CutListPage() {
         }}
       >
       <s-section>
-        <s-stack gap="base" direction="inline">
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(7, minmax(0, 1fr))",
+            gap: "0.75rem",
+          }}
+        >
           <s-box
             padding="base"
             background={currentFilter === "rush" ? "subdued" : "base"}
@@ -2415,6 +2601,23 @@ export default function CutListPage() {
 </s-box>
 
           <s-box
+            padding="base"
+            background={currentFilter === "localPickup" ? "subdued" : "base"}
+            borderWidth="base"
+            borderColor="base"
+            borderRadius="base"
+          >
+            <s-clickable onClick={() => setCurrentFilter("localPickup")}>
+              <s-stack gap="small">
+                <s-text color="subdued">Local Pickup Orders</s-text>
+                <s-text type="strong" tone="success">
+                  {stats.localPickup}
+                </s-text>
+              </s-stack>
+            </s-clickable>
+          </s-box>
+
+          <s-box
   padding="base"
   background={currentFilter === "hold" ? "subdued" : "base"}
   borderWidth="base"
@@ -2520,13 +2723,55 @@ export default function CutListPage() {
               </s-text>
             </s-stack>
           </s-box>
-        </s-stack>
+        </div>
       </s-section>
+      {newRushAlerts.length > 0 && (
+        <s-section>
+          <s-stack gap="small">
+            {newRushAlerts.map((alert) => (
+              <s-banner key={alert.orderId} tone="critical">
+                <s-stack gap="base" direction="inline">
+                  <s-text type="strong">
+                    🚨 New rush order: {alert.orderName}
+                    {alert.itemCount > 1
+                      ? ` — ${alert.itemCount} items`
+                      : alert.skus[0]
+                        ? ` — ${alert.skus[0]}`
+                        : ""}
+                  </s-text>
+                  <s-button
+                    variant="primary"
+                    onClick={() => {
+                      setCurrentFilter("rush");
+                      setNewRushAlerts((prev) =>
+                        prev.filter((a) => a.orderId !== alert.orderId),
+                      );
+                    }}
+                  >
+                    Jump to rush
+                  </s-button>
+                  <s-button
+                    variant="tertiary"
+                    onClick={() =>
+                      setNewRushAlerts((prev) =>
+                        prev.filter((a) => a.orderId !== alert.orderId),
+                      )
+                    }
+                  >
+                    Dismiss
+                  </s-button>
+                </s-stack>
+              </s-banner>
+            ))}
+          </s-stack>
+        </s-section>
+      )}
       </div>
 
       {(currentFilter === "pickedToday" ||
         currentFilter === "rush" ||
-        currentFilter === "readyToShip") && (
+        currentFilter === "readyToShip" ||
+        currentFilter === "localPickup") && (
         <s-section>
           <s-button variant="secondary" onClick={() => setCurrentFilter("all")}>
             Back to Cut List
@@ -2597,6 +2842,9 @@ export default function CutListPage() {
                 const productIdNum = item.productId.split("/").pop();
                 const isActive = activeLineId === item.lineItemId;
                 const isRush = isRushOrder(item.orderTags);
+                const isLocalPickup = item.orderTags.some(
+                  (t) => t.toLowerCase() === "local pickup",
+                );
                 const isMultipleOrders = item.orderTags.some(
                   (t) => t.toLowerCase() === "multiple orders"
                 );
@@ -2673,6 +2921,11 @@ const cellStyle = {
                   <s-table-row
   key={itemKey}
   style={cellStyle}
+  data-rush-order-id={
+    newRushAlerts.some((a) => a.orderId === item.orderId)
+      ? item.orderId.split("/").pop()
+      : undefined
+  }
 >
 <s-table-cell
   style={cellStyle}
@@ -2730,6 +2983,7 @@ const cellStyle = {
                       <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
                       <s-stack gap="small" direction="inline">
   {isRush && <s-badge tone="critical">RUSH</s-badge>}
+  {isLocalPickup && <s-badge tone="success">LOCAL PICKUP</s-badge>}
   {isMultipleOrders && <s-badge tone="info">MULTIPLE ORDERS</s-badge>}
   {item.hasHold && <s-badge tone="critical">FULFILLMENT HOLD</s-badge>}
   {isFinalCut && (
