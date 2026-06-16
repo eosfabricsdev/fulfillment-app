@@ -570,7 +570,7 @@ export default function CutListPage() {
         })),
       ),
     );
-    cutLogFetcher.submit(form, { method: "post" });
+    fetch(window.location.pathname, { method: "POST", body: form }).catch(() => {});
   };
   const revalidator = useRevalidator();
 
@@ -580,8 +580,65 @@ export default function CutListPage() {
   useEffect(() => {
     const newCutListItems = data.cutListItems || [];
     const newPickedTodayItems = data.pickedTodayItems || [];
-    setCutListItems(newCutListItems);
-    setPickedTodayItems(newPickedTodayItems);
+
+    const protectedOrderIds = getProtectedOrderIds();
+
+    setCutListItems((prev) => {
+      if (protectedOrderIds.size === 0) return newCutListItems;
+      const prevByLineId = new Map(prev.map((i) => [i.lineItemId, i]));
+      const prevByOrderId = new Map<string, CutListItem[]>();
+      for (const i of prev) {
+        if (!prevByOrderId.has(i.orderId)) prevByOrderId.set(i.orderId, []);
+        prevByOrderId.get(i.orderId)!.push(i);
+      }
+      const seenOrderIds = new Set<string>();
+      const merged: CutListItem[] = [];
+      for (const item of newCutListItems) {
+        seenOrderIds.add(item.orderId);
+        if (protectedOrderIds.has(item.orderId)) {
+          const local = prevByLineId.get(item.lineItemId);
+          merged.push(local ?? item);
+        } else {
+          merged.push(item);
+        }
+      }
+      for (const orderId of protectedOrderIds) {
+        if (!seenOrderIds.has(orderId)) {
+          const localItems = prevByOrderId.get(orderId) ?? [];
+          merged.push(...localItems);
+        }
+      }
+      return merged;
+    });
+
+    setPickedTodayItems((prev) => {
+      if (protectedOrderIds.size === 0) return newPickedTodayItems;
+      const prevByLineId = new Map(prev.map((i) => [i.lineItemId, i]));
+      const prevByOrderId = new Map<string, CutListItem[]>();
+      for (const i of prev) {
+        if (!prevByOrderId.has(i.orderId)) prevByOrderId.set(i.orderId, []);
+        prevByOrderId.get(i.orderId)!.push(i);
+      }
+      const seenOrderIds = new Set<string>();
+      const merged: CutListItem[] = [];
+      for (const item of newPickedTodayItems) {
+        seenOrderIds.add(item.orderId);
+        if (protectedOrderIds.has(item.orderId)) {
+          const local = prevByLineId.get(item.lineItemId);
+          merged.push(local ?? item);
+        } else {
+          merged.push(item);
+        }
+      }
+      for (const orderId of protectedOrderIds) {
+        if (!seenOrderIds.has(orderId)) {
+          const localItems = prevByOrderId.get(orderId) ?? [];
+          merged.push(...localItems);
+        }
+      }
+      return merged;
+    });
+
     setLastUpdated(new Date());
 
     const knownIds = new Set<string>();
@@ -600,10 +657,22 @@ export default function CutListPage() {
         persistedPicked.add(item.lineItemId);
       }
     }
+    const lineItemToOrderId = new Map<string, string>();
+    for (const item of [...newCutListItems, ...newPickedTodayItems]) {
+      lineItemToOrderId.set(item.lineItemId, item.orderId);
+    }
+
     setPickedItems((prev) => {
       const next = new Set<string>();
       for (const id of prev) {
-        if (!knownIds.has(id)) next.add(id);
+        if (!knownIds.has(id)) {
+          next.add(id);
+          continue;
+        }
+        const oid = lineItemToOrderId.get(id);
+        if (oid && protectedOrderIds.has(oid)) {
+          next.add(id);
+        }
       }
       persistedPicked.forEach((id) => next.add(id));
       return next;
@@ -619,7 +688,14 @@ export default function CutListPage() {
     setPrintedLines((prev) => {
       const next = new Set<string>();
       for (const id of prev) {
-        if (!knownIds.has(id)) next.add(id);
+        if (!knownIds.has(id)) {
+          next.add(id);
+          continue;
+        }
+        const oid = lineItemToOrderId.get(id);
+        if (oid && protectedOrderIds.has(oid)) {
+          next.add(id);
+        }
       }
       persistedPrinted.forEach((id) => next.add(id));
       return next;
@@ -637,7 +713,14 @@ export default function CutListPage() {
     setSkippedItems((prev) => {
       const next = new Set<string>();
       for (const id of prev) {
-        if (!knownIds.has(id)) next.add(id);
+        if (!knownIds.has(id)) {
+          next.add(id);
+          continue;
+        }
+        const oid = lineItemToOrderId.get(id);
+        if (oid && protectedOrderIds.has(oid)) {
+          next.add(id);
+        }
       }
       persistedSkipped.forEach((id) => next.add(id));
       return next;
@@ -650,6 +733,20 @@ export default function CutListPage() {
   const [pickedItems, setPickedItems] = useState<Set<string>>(new Set());
   const [printedLines, setPrintedLines] = useState<Set<string>>(new Set());
   const [skippedItems, setSkippedItems] = useState<Set<string>>(new Set());
+
+  const recentMutationsRef = useRef<Map<string, number>>(new Map());
+  const markOrderMutated = (orderId: string) => {
+    recentMutationsRef.current.set(orderId, Date.now());
+  };
+  const getProtectedOrderIds = (): Set<string> => {
+    const now = Date.now();
+    const protectedIds = new Set<string>();
+    for (const [orderId, ts] of recentMutationsRef.current) {
+      if (now - ts < 60000) protectedIds.add(orderId);
+      else recentMutationsRef.current.delete(orderId);
+    }
+    return protectedIds;
+  };
 
   type RushAlert = {
     orderId: string;
@@ -1166,19 +1263,21 @@ export default function CutListPage() {
   }, [data.cutListItems, data.pickedTodayItems]);
 
   function submitTagsAdd(orderId: string, tags: string[]) {
+    markOrderMutated(orderId);
     const form = new FormData();
     form.append("intent", "tagsAdd");
     form.append("orderId", orderId);
     tags.forEach((tag) => form.append("tags", tag));
-    tagFetcher.submit(form, { method: "post" });
+    fetch(window.location.pathname, { method: "POST", body: form }).catch(() => {});
   }
 
   function submitTagsRemove(orderId: string, tags: string[]) {
+    markOrderMutated(orderId);
     const form = new FormData();
     form.append("intent", "tagsRemove");
     form.append("orderId", orderId);
     tags.forEach((tag) => form.append("tags", tag));
-    tagFetcher.submit(form, { method: "post" });
+    fetch(window.location.pathname, { method: "POST", body: form }).catch(() => {});
   }
 
   function submitTagsUpdate(
@@ -1187,12 +1286,13 @@ export default function CutListPage() {
     addTags: string[],
   ) {
     if (removeTags.length === 0 && addTags.length === 0) return;
+    markOrderMutated(orderId);
     const form = new FormData();
     form.append("intent", "tagsUpdate");
     form.append("orderId", orderId);
     removeTags.forEach((tag) => form.append("removeTags", tag));
     addTags.forEach((tag) => form.append("addTags", tag));
-    tagFetcher.submit(form, { method: "post" });
+    fetch(window.location.pathname, { method: "POST", body: form }).catch(() => {});
   }
 
   const effectiveCreatedAt = (item: CutListItem): number => {
@@ -1498,11 +1598,25 @@ export default function CutListPage() {
       colorCode: item.colorCode || null,
     };
 
-    if (!isSilkSwatchNeedingSubstitute(item)) return [baseItem];
+    const itemIsSwatch = isSwatch(item);
+    const repeatCount = itemIsSwatch ? Math.max(1, item.quantity) : 1;
+
+    const repeatPerUnit = (labels: typeof baseItem[]) => {
+      if (!itemIsSwatch) return labels;
+      const out: typeof baseItem[] = [];
+      for (const label of labels) {
+        for (let i = 0; i < repeatCount; i++) {
+          out.push({ ...label, quantity: 1 });
+        }
+      }
+      return out;
+    };
+
+    if (!isSilkSwatchNeedingSubstitute(item)) return repeatPerUnit([baseItem]);
 
     const key = `${item.productId}::${item.colorCode}`;
     const res = substitutes.get(key);
-    if (!res) return [baseItem];
+    if (!res) return repeatPerUnit([baseItem]);
 
     const labels: typeof baseItem[] = [];
     if (res.substituteA) {
@@ -1525,7 +1639,7 @@ export default function CutListPage() {
         colorCode: res.substituteB.colorCode,
       });
     }
-    return labels.length > 0 ? labels : [baseItem];
+    return repeatPerUnit(labels.length > 0 ? labels : [baseItem]);
   }
 
   function isItemCut(item: CutListItem): boolean {
@@ -1770,7 +1884,10 @@ export default function CutListPage() {
         const allAreYardPiece = items.every((item) =>
           item.variantTitle?.includes("Yard Piece"),
         );
-        if (allAreYardPiece) rollEndOrders.add(orderId);
+        const hasUncut = items.some(
+          (item) => !pickedItems.has(item.lineItemId),
+        );
+        if (allAreYardPiece && hasUncut) rollEndOrders.add(orderId);
       });
       return allItems.filter((item) => rollEndOrders.has(item.orderId));
     }
@@ -1780,7 +1897,10 @@ export default function CutListPage() {
       const swatchOrders = new Set<string>();
       fullOrderMap.forEach((items, orderId) => {
         const allAreSwatches = items.every((item) => isSwatch(item));
-        if (allAreSwatches) swatchOrders.add(orderId);
+        const hasUncut = items.some(
+          (item) => !pickedItems.has(item.lineItemId),
+        );
+        if (allAreSwatches && hasUncut) swatchOrders.add(orderId);
       });
       return allItems.filter((item) => swatchOrders.has(item.orderId));
     }
@@ -1829,9 +1949,12 @@ export default function CutListPage() {
         item.variantTitle?.includes("Yard Piece"),
       );
       const allAreSwatches = items.every((item) => isSwatch(item));
+      const hasUncut = items.some(
+        (item) => !pickedItems.has(item.lineItemId),
+      );
 
-      if (allAreYardPiece) rollEndsOnlyCount++;
-      if (allAreSwatches) swatchesOnlyCount++;
+      if (allAreYardPiece && hasUncut) rollEndsOnlyCount++;
+      if (allAreSwatches && hasUncut) swatchesOnlyCount++;
     });
 
     const cutLogItems = pickedTodayItems.filter((item) => {
@@ -1863,9 +1986,11 @@ export default function CutListPage() {
         .map((item) => item.orderId),
     );
 
-    const totalSwatchesCount = filteredCutListItems.filter((item) =>
-      isSwatch(item),
-    ).length;
+    const totalSwatchesCount = filteredCutListItems
+      .filter(
+        (item) => isSwatch(item) && !pickedItems.has(item.lineItemId),
+      )
+      .reduce((sum, item) => sum + Math.max(1, item.quantity), 0);
 
     const localPickupOrders = new Set(
       filteredCutListItems
