@@ -7,6 +7,29 @@ import prisma from "../db.server";
 
 const VIRTUAL_SKU = "85496775805861";
 
+// Embedded-app POSTs must include the current query string (shop/host/embedded/
+// id_token) so `authenticate.admin` can resolve the session. Posting to
+// `window.location.pathname` alone drops those params and the request is bounced,
+// causing tag/cut writes to silently fail.
+function actionUrl(): string {
+  return window.location.pathname + window.location.search;
+}
+
+// Fire-and-forget POST that surfaces failures instead of swallowing them.
+function postAction(form: FormData): Promise<Response | null> {
+  return fetch(actionUrl(), { method: "POST", body: form })
+    .then((resp) => {
+      if (!resp.ok) {
+        console.error("[action] request failed", resp.status, resp.statusText);
+      }
+      return resp;
+    })
+    .catch((err) => {
+      console.error("[action] request error", err);
+      return null;
+    });
+}
+
 type Metafield = {
   key: string;
   value: string;
@@ -570,7 +593,7 @@ export default function CutListPage() {
         })),
       ),
     );
-    fetch(window.location.pathname, { method: "POST", body: form }).catch(() => {});
+    postAction(form);
   };
   const revalidator = useRevalidator();
 
@@ -1268,7 +1291,7 @@ export default function CutListPage() {
     form.append("intent", "tagsAdd");
     form.append("orderId", orderId);
     tags.forEach((tag) => form.append("tags", tag));
-    fetch(window.location.pathname, { method: "POST", body: form }).catch(() => {});
+    postAction(form);
   }
 
   function submitTagsRemove(orderId: string, tags: string[]) {
@@ -1277,7 +1300,7 @@ export default function CutListPage() {
     form.append("intent", "tagsRemove");
     form.append("orderId", orderId);
     tags.forEach((tag) => form.append("tags", tag));
-    fetch(window.location.pathname, { method: "POST", body: form }).catch(() => {});
+    postAction(form);
   }
 
   function submitTagsUpdate(
@@ -1292,7 +1315,7 @@ export default function CutListPage() {
     form.append("orderId", orderId);
     removeTags.forEach((tag) => form.append("removeTags", tag));
     addTags.forEach((tag) => form.append("addTags", tag));
-    fetch(window.location.pathname, { method: "POST", body: form }).catch(() => {});
+    postAction(form);
   }
 
   const effectiveCreatedAt = (item: CutListItem): number => {
@@ -1569,7 +1592,7 @@ export default function CutListPage() {
     form.append("intent", "resolveSilkSubstitutes");
     form.append("items", JSON.stringify(inputs));
 
-    const resp = await fetch(window.location.pathname, {
+    const resp = await fetch(actionUrl(), {
       method: "POST",
       body: form,
     });
