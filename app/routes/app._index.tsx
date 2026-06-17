@@ -1,33 +1,43 @@
 // @ts-nocheck
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { useFetcher, useLoaderData, useRevalidator } from "react-router";
+import { useLoaderData, useRevalidator } from "react-router";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 
 const VIRTUAL_SKU = "85496775805861";
 
-// Embedded-app POSTs must include the current query string (shop/host/embedded/
-// id_token) so `authenticate.admin` can resolve the session. Posting to
-// `window.location.pathname` alone drops those params and the request is bounced,
-// causing tag/cut writes to silently fail.
-function actionUrl(): string {
-  return window.location.pathname + window.location.search;
+// Shopify caps order tags at 40 chars and SILENTLY rejects over-length tags (HTTP
+// 200 + userErrors). The cut-line tag is "<prefix><14-digit line id>_<sku>", so the
+// prefix length directly limits how much SKU fits. We use the short "picked:" prefix
+// (vs the old "picked-line:") to leave ~18 chars for the SKU, still capping the whole
+// tag at 40 so it always persists.
+//
+// Matching accepts BOTH "picked:" and the legacy "picked-line:" so orders cut before
+// this change keep working. "picked:" is safe against the loader's `-tag:picked`
+// filter: Shopify `tag:` is an exact match (proven — legacy "picked-line:" tags were
+// never caught by `tag:picked`, or partial orders would have vanished).
+const PICKED_LINE_PREFIX = "picked:";
+const PICKED_LINE_PREFIXES = ["picked:", "picked-line:"];
+
+function pickedLineTag(numericId: string, sku: string | null | undefined): string {
+  const base = `${PICKED_LINE_PREFIX}${numericId}`;
+  return sku ? `${base}_${sku}`.slice(0, 40) : base;
 }
 
-// Fire-and-forget POST that surfaces failures instead of swallowing them.
-function postAction(form: FormData): Promise<Response | null> {
-  return fetch(actionUrl(), { method: "POST", body: form })
-    .then((resp) => {
-      if (!resp.ok) {
-        console.error("[action] request failed", resp.status, resp.statusText);
-      }
-      return resp;
-    })
-    .catch((err) => {
-      console.error("[action] request error", err);
-      return null;
-    });
+// True if `tag` is the picked-line tag for this numeric line id (new or legacy form).
+function isPickedLineTagFor(tag: string, numericId: string): boolean {
+  const lower = tag.toLowerCase();
+  return PICKED_LINE_PREFIXES.some((prefix) => {
+    const p = `${prefix}${numericId}`.toLowerCase();
+    return lower === p || lower.startsWith(p + "_");
+  });
+}
+
+// True if `tag` is any picked-line tag (new or legacy) — used to skip them.
+function isAnyPickedLineTag(tag: string): boolean {
+  const lower = tag.toLowerCase();
+  return PICKED_LINE_PREFIXES.some((prefix) => lower.startsWith(prefix));
 }
 
 type Metafield = {
@@ -423,113 +433,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return { ok: true };
   }
 
-  if (intent === "resolveSilkSubstitutes") {
-    const itemsJson = String(formData.get("items") || "[]");
-    let inputs: Array<{ productId: string; colorCode: string }> = [];
-    try {
-      inputs = JSON.parse(itemsJson);
-    } catch {
-      inputs = [];
-    }
-
-    const variantFields = `
-      sku
-      barcode
-      title
-      selectedOptions { name value }
-      product { id title }
-      colorCode: metafield(namespace: "custom", key: "color_code") { value }
-    `;
-
-    const cdcResp = await admin.graphql(
-      `#graphql
-      query CdcAnchor {
-        productVariants(first: 1, query: "sku:41031") {
-          nodes {
-            product {
-              id
-              title
-              variants(first: 250) {
-                nodes {
-                  ${variantFields}
-                }
-              }
-            }
-          }
-        }
-      }`,
-    );
-    const cdcJson = await cdcResp.json();
-    const cdcProduct =
-      cdcJson.data?.productVariants?.nodes?.[0]?.product ?? null;
-    const cdcVariants: any[] = cdcProduct?.variants?.nodes ?? [];
-
-    const uniqueProductIds = Array.from(
-      new Set(inputs.map((i) => i.productId).filter(Boolean)),
-    );
-    const productVariantsMap = new Map<string, any[]>();
-    for (const pid of uniqueProductIds) {
-      const resp = await admin.graphql(
-        `#graphql
-        query OrderedProduct($id: ID!) {
-          product(id: $id) {
-            id
-            title
-            variants(first: 250) {
-              nodes {
-                ${variantFields}
-              }
-            }
-          }
-        }`,
-        { variables: { id: pid } },
-      );
-      const json = await resp.json();
-      productVariantsMap.set(pid, json.data?.product?.variants?.nodes ?? []);
-    }
-
-    const norm = (s: string | null | undefined) =>
-      (s ?? "").trim().toLowerCase();
-    const findSwatch = (variants: any[], colorCode: string) => {
-      const target = norm(colorCode);
-      return (
-        variants.find((v) => {
-          const flOpt = v.selectedOptions?.find(
-            (o: any) => norm(o.name) === "fabric length",
-          );
-          const fl = norm(flOpt?.value);
-          const vc = norm(v.colorCode?.value);
-          return fl === "swatch sample" && vc === target;
-        }) ?? null
-      );
-    };
-
-    const toPayload = (v: any) =>
-      v
-        ? {
-            productTitle: v.product?.title ?? "",
-            variantTitle: v.title ?? null,
-            sku: v.sku ?? "",
-            barcode: v.barcode ?? null,
-            colorCode: v.colorCode?.value ?? null,
-          }
-        : null;
-
-    const results = inputs.map(({ productId, colorCode }) => {
-      const subA = findSwatch(cdcVariants, colorCode);
-      const orderedVariants = productVariantsMap.get(productId) ?? [];
-      const subB = findSwatch(orderedVariants, "101");
-      return {
-        productId,
-        colorCode,
-        substituteA: toPayload(subA),
-        substituteB: toPayload(subB),
-      };
-    });
-
-    return { ok: true, results };
-  }
-
   if (intent === "tagsUpdate") {
     const removeTags = formData.getAll("removeTags").map(String);
     const addTags = formData.getAll("addTags").map(String);
@@ -565,8 +468,39 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
 export default function CutListPage() {
   const data = useLoaderData<typeof loader>();
-  const tagFetcher = useFetcher();
-  const cutLogFetcher = useFetcher();
+  // All order-tag writes go to the /api/order-tags resource route via fetch, queued
+  // PER ORDER. Shopify tag mutations are read-modify-write, so two writes to the same
+  // order running at once clobber each other (lost updates) — cutting several items of
+  // one order in quick succession would drop tags (picked-line / picked / partially
+  // picked). Chaining per order serializes same-order writes (no race) while different
+  // orders still run in parallel. (A shared useFetcher cancels in-flight submits; a raw
+  // fetch to /app 405s under single fetch — hence a dedicated resource route we await.)
+  const orderWriteQueues = useRef<Map<string, Promise<unknown>>>(new Map());
+  const enqueueWrite = (form: FormData) => {
+    const intent = String(form.get("intent") || "");
+    const key =
+      intent === "logCut"
+        ? "__logcut__"
+        : String(form.get("orderId") || "__none__");
+    const prev = orderWriteQueues.current.get(key) ?? Promise.resolve();
+    const next = prev
+      .catch(() => {})
+      .then(() =>
+        fetch(`/api/order-tags${window.location.search}`, {
+          method: "POST",
+          body: form,
+        }),
+      )
+      .then(async (resp) => {
+        if (!resp.ok) {
+          const body = await resp.json().catch(() => null);
+          console.error("[order-tags] write rejected", resp.status, body);
+        }
+      })
+      .catch((err) => console.error("[order-tags] write error", err));
+    orderWriteQueues.current.set(key, next);
+    return next;
+  };
   const staffMember = data.staffMember;
 
   const submitLogCut = (
@@ -593,7 +527,7 @@ export default function CutListPage() {
         })),
       ),
     );
-    postAction(form);
+    enqueueWrite(form);
   };
   const revalidator = useRevalidator();
 
@@ -670,13 +604,7 @@ export default function CutListPage() {
       knownIds.add(item.lineItemId);
       const numericId = item.lineItemId.split("/").pop();
       if (!numericId) continue;
-      const tagPrefix = `picked-line:${numericId}`.toLowerCase();
-      if (
-        item.orderTags.some((t) => {
-          const lower = t.toLowerCase();
-          return lower === tagPrefix || lower.startsWith(tagPrefix + "_");
-        })
-      ) {
+      if (item.orderTags.some((t) => isPickedLineTagFor(t, numericId))) {
         persistedPicked.add(item.lineItemId);
       }
     }
@@ -1198,12 +1126,6 @@ export default function CutListPage() {
   }, [activeLineId, cutListItems]);
 
   useEffect(() => {
-    if (tagFetcher.state === "idle" && tagFetcher.data?.ok) {
-      // no-op; optimistic UI is already updating local state
-    }
-  }, [tagFetcher.state, tagFetcher.data]);
-
-  useEffect(() => {
     if (getFilteredItems().length > 0 && !activeLineId) {
       setActiveLineId(getFilteredItems()[0].lineItemId);
     }
@@ -1291,7 +1213,7 @@ export default function CutListPage() {
     form.append("intent", "tagsAdd");
     form.append("orderId", orderId);
     tags.forEach((tag) => form.append("tags", tag));
-    postAction(form);
+    enqueueWrite(form);
   }
 
   function submitTagsRemove(orderId: string, tags: string[]) {
@@ -1300,7 +1222,7 @@ export default function CutListPage() {
     form.append("intent", "tagsRemove");
     form.append("orderId", orderId);
     tags.forEach((tag) => form.append("tags", tag));
-    postAction(form);
+    enqueueWrite(form);
   }
 
   function submitTagsUpdate(
@@ -1315,7 +1237,7 @@ export default function CutListPage() {
     form.append("orderId", orderId);
     removeTags.forEach((tag) => form.append("removeTags", tag));
     addTags.forEach((tag) => form.append("addTags", tag));
-    postAction(form);
+    enqueueWrite(form);
   }
 
   const effectiveCreatedAt = (item: CutListItem): number => {
@@ -1589,13 +1511,15 @@ export default function CutListPage() {
     }
 
     const form = new FormData();
-    form.append("intent", "resolveSilkSubstitutes");
     form.append("items", JSON.stringify(inputs));
 
-    const resp = await fetch(actionUrl(), {
-      method: "POST",
-      body: form,
-    });
+    const resp = await fetch(
+      `/api/silk-substitutes${window.location.search}`,
+      {
+        method: "POST",
+        body: form,
+      },
+    );
     const json: any = await resp.json().catch(() => null);
     const results: SubstituteResult[] = json?.results ?? [];
     console.log("[silk] resolver inputs", inputs);
@@ -1673,11 +1597,7 @@ export default function CutListPage() {
 
     const numericId = item.lineItemId.split("/").pop();
     if (!numericId) return false;
-    const tagPrefix = `picked-line:${numericId}`.toLowerCase();
-    return item.orderTags.some((t) => {
-      const lower = t.toLowerCase();
-      return lower === tagPrefix || lower.startsWith(tagPrefix + "_");
-    });
+    return item.orderTags.some((t) => isPickedLineTagFor(t, numericId));
   }
 
   const skipItem = (item: CutListItem, options?: { fromHistory?: boolean }) => {
@@ -1763,8 +1683,7 @@ export default function CutListPage() {
     const isoDatePattern = /^\d{4}-\d{2}-\d{2}/;
     for (const tag of item.orderTags) {
       const lower = tag.toLowerCase();
-      if (lower.startsWith("cut-by:") || lower.startsWith("picked-line:"))
-        continue;
+      if (lower.startsWith("cut-by:") || isAnyPickedLineTag(tag)) continue;
       if (!excludeTags.includes(lower) && !isoDatePattern.test(tag)) {
         return tag;
       }
@@ -2131,14 +2050,11 @@ export default function CutListPage() {
       });
     }
 
-    const substitutes =
-      includeCut && isSilkSwatchNeedingSubstitute(item)
-        ? await resolveSilkSubstitutes([item])
-        : new Map<string, SubstituteResult>();
-    const expanded = expandSilkSwatchForPrint(item, substitutes);
-    const itemsParam = encodeURIComponent(JSON.stringify(expanded));
-    const url = `/print-label-both?orderName=${encodeURIComponent(item.orderName)}&items=${itemsParam}&includeBin=${includeBin}&includeCut=${includeCut}`;
-
+    // Record the cut synchronously BEFORE any await. A React Router fetcher
+    // submission must fire within the click handler's synchronous run; calling
+    // it after `await resolveSilkSubstitutes` drops the write so the cut never
+    // persists and the line returns to the list. Substitutes are only needed for
+    // the printed labels, so they are resolved after the cut is recorded.
     const orderItems = cutListItems.filter((i) => i.orderId === item.orderId);
     const pickedCount = orderItems.filter(
       (i) => pickedItems.has(i.lineItemId) || i.lineItemId === item.lineItemId,
@@ -2146,10 +2062,13 @@ export default function CutListPage() {
     const totalCount = orderItems.filter((i) => i.sku !== VIRTUAL_SKU).length;
     const timestamp = formatEasternTagTimestamp();
     const numericLineId = item.lineItemId.split("/").pop() || item.lineItemId;
-    const lineItemTag = item.sku
-      ? `picked-line:${numericLineId}_${item.sku}`
-      : `picked-line:${numericLineId}`;
-    const cutByName = (employeeName || "Unknown").replace(/,/g, "").trim();
+    const lineItemTag = pickedLineTag(numericLineId, item.sku);
+    // Keep cut-by under Shopify's 40-char tag limit: "cut-by:" + 14-digit id + "_"
+    // already uses 22 chars, leaving ~18 for the name.
+    const cutByName = (employeeName || "Unknown")
+      .replace(/,/g, "")
+      .trim()
+      .slice(0, 16);
     const cutByTag = `cut-by:${numericLineId}_${cutByName}`;
     const orderHadPrintedTag = item.orderTags.some(
       (t) => t.toLowerCase() === "printed",
@@ -2235,6 +2154,14 @@ export default function CutListPage() {
       },
     ]);
 
+    const substitutes =
+      includeCut && isSilkSwatchNeedingSubstitute(item)
+        ? await resolveSilkSubstitutes([item])
+        : new Map<string, SubstituteResult>();
+    const expanded = expandSilkSwatchForPrint(item, substitutes);
+    const itemsParam = encodeURIComponent(JSON.stringify(expanded));
+    const url = `/print-label-both?orderName=${encodeURIComponent(item.orderName)}&items=${itemsParam}&includeBin=${includeBin}&includeCut=${includeCut}`;
+
     if (!skipWindow) {
       window.open(url, "_blank");
     }
@@ -2278,16 +2205,12 @@ export default function CutListPage() {
     const tagsToRemove: string[] = [];
     for (const it of items) {
       const numericId = it.lineItemId.split("/").pop() || it.lineItemId;
-      const pickedLinePrefix = `picked-line:${numericId}`.toLowerCase();
       const readyToShipExact = `ready-to-ship:${numericId}`.toLowerCase();
       const cutByPrefix = `cut-by:${numericId}_`.toLowerCase();
       const skippedExact = `skipped:${numericId}`.toLowerCase();
       for (const tag of orderTags) {
         const lower = tag.toLowerCase();
-        if (
-          lower === pickedLinePrefix ||
-          lower.startsWith(pickedLinePrefix + "_")
-        ) {
+        if (isPickedLineTagFor(tag, numericId)) {
           tagsToRemove.push(tag);
         }
         if (lower === readyToShipExact) {
@@ -2471,16 +2394,8 @@ export default function CutListPage() {
       });
     }
 
-    const substitutes = await resolveSilkSubstitutes(swatches);
-    const expanded = swatches.flatMap((s) =>
-      expandSilkSwatchForPrint(s, substitutes),
-    );
-    const itemsParam = encodeURIComponent(JSON.stringify(expanded));
-
-    const includeBin = true;
-
-    const url = `/print-label-both?orderName=${encodeURIComponent(orderName)}&items=${itemsParam}&includeBin=${includeBin}&includeCut=true`;
-
+    // Record the cut synchronously BEFORE any await (see note in openPrint) —
+    // substitutes/print happen afterward.
     const orderItemsInList = cutListItems.filter((i) => i.orderId === orderId);
     const swatchIds = new Set(swatches.map((s) => s.lineItemId));
     const pickedAfter = new Set(pickedItems);
@@ -2494,11 +2409,14 @@ export default function CutListPage() {
     const timestamp = formatEasternTagTimestamp();
     const swatchLineTags = swatches.map((s) => {
       const numericId = s.lineItemId.split("/").pop() || s.lineItemId;
-      return s.sku
-        ? `picked-line:${numericId}_${s.sku}`
-        : `picked-line:${numericId}`;
+      return pickedLineTag(numericId, s.sku);
     });
-    const cutByName = (employeeName || "Unknown").replace(/,/g, "").trim();
+    // Keep cut-by under Shopify's 40-char tag limit: "cut-by:" + 14-digit id + "_"
+    // already uses 22 chars, leaving ~18 for the name.
+    const cutByName = (employeeName || "Unknown")
+      .replace(/,/g, "")
+      .trim()
+      .slice(0, 16);
     const cutByTags = swatches.map((s) => {
       const numericId = s.lineItemId.split("/").pop() || s.lineItemId;
       return `cut-by:${numericId}_${cutByName}`;
@@ -2589,6 +2507,12 @@ export default function CutListPage() {
       })),
     );
 
+    const substitutes = await resolveSilkSubstitutes(swatches);
+    const expanded = swatches.flatMap((s) =>
+      expandSilkSwatchForPrint(s, substitutes),
+    );
+    const itemsParam = encodeURIComponent(JSON.stringify(expanded));
+    const url = `/print-label-both?orderName=${encodeURIComponent(orderName)}&items=${itemsParam}&includeBin=true&includeCut=true`;
     window.open(url, "_blank");
 
     const itemsNow = getFilteredItems();
