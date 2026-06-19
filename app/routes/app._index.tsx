@@ -1524,6 +1524,7 @@ export default function CutListPage() {
     const results: SubstituteResult[] = json?.results ?? [];
     console.log("[silk] resolver inputs", inputs);
     console.log("[silk] resolver results", results);
+    console.log("[silk] debug", json?.debug);
 
     const map = new Map<string, SubstituteResult>();
     for (const r of results) {

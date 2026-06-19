@@ -112,5 +112,28 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     };
   });
 
-  return Response.json({ ok: true, results });
+  // TEMP DIAGNOSTIC — remove after debugging substituteA (CDC-in-ordered-color).
+  // Shows what the CDC anchor lookup actually returned so we can see whether the
+  // CDC swatch variants carry color_code values matching the ordered colors.
+  const cdcSwatchColorCodes = cdcVariants
+    .filter(
+      (v) =>
+        norm(
+          v.selectedOptions?.find((o: any) => norm(o.name) === "fabric length")
+            ?.value,
+        ) === "swatch sample",
+    )
+    .map((v) => v.colorCode?.value ?? null);
+
+  return Response.json({
+    ok: true,
+    results,
+    debug: {
+      cdcProductTitle: cdcProduct?.title ?? null,
+      cdcVariantCount: cdcVariants.length,
+      cdcSwatchCount: cdcSwatchColorCodes.length,
+      cdcColorCodes: cdcSwatchColorCodes,
+      requestedColors: inputs.map((i) => i.colorCode),
+    },
+  });
 };
