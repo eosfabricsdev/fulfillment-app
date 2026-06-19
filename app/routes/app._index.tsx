@@ -1125,6 +1125,24 @@ export default function CutListPage() {
     });
   }, [activeLineId, cutListItems]);
 
+  // Auto-open the order note when a line is activated, so the cutter sees any
+  // special instructions BEFORE cutting. Shown once per order (marked acknowledged),
+  // so it won't re-pop; the NOTE badge still reopens it on demand.
+  useEffect(() => {
+    if (!activeLineId) return;
+    const activeItem =
+      cutListItems.find((i) => i.lineItemId === activeLineId) ??
+      pickedTodayItems.find((i) => i.lineItemId === activeLineId);
+    if (!activeItem) return;
+    if (!activeItem.orderNote) return;
+    if (acknowledgedNotes.has(activeItem.orderId)) return;
+    setNoteModalContent({
+      orderName: activeItem.orderName,
+      note: activeItem.orderNote,
+    });
+    setAcknowledgedNotes((prev) => new Set(prev).add(activeItem.orderId));
+  }, [activeLineId, cutListItems, pickedTodayItems, acknowledgedNotes]);
+
   useEffect(() => {
     if (getFilteredItems().length > 0 && !activeLineId) {
       setActiveLineId(getFilteredItems()[0].lineItemId);
@@ -1991,14 +2009,8 @@ export default function CutListPage() {
 
     setReadyToPrint((prev) => new Set(prev).add(item.lineItemId));
     setBarcodeInputs((prev) => ({ ...prev, [itemKey]: "" }));
-
-    if (item.orderNote && !acknowledgedNotes.has(item.orderId)) {
-      setNoteModalContent({
-        orderName: item.orderName,
-        note: item.orderNote,
-      });
-      setAcknowledgedNotes((prev) => new Set(prev).add(item.orderId));
-    }
+    // Note: the order-note modal opens on line activation (see the activeLineId
+    // effect), not here — so the cutter sees it before scanning, only once.
   };
 
   const upsertOrderInPickedToday = (

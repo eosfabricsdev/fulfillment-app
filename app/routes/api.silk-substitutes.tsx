@@ -27,27 +27,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     colorCode: metafield(namespace: "custom", key: "color_code") { value }
   `;
 
+  // SKU 41031 is shared across the CDC "By the Yard" AND "Swatch Sample" products.
+  // Fetch ALL variants with that SKU (not just the first product's) so findSwatch
+  // can pick the Swatch Sample variant in the ordered color, regardless of which
+  // product it lives in.
   const cdcResp = await admin.graphql(
     `#graphql
     query CdcAnchor {
-      productVariants(first: 1, query: "sku:41031") {
+      productVariants(first: 250, query: "sku:41031") {
         nodes {
-          product {
-            id
-            title
-            variants(first: 250) {
-              nodes {
-                ${variantFields}
-              }
-            }
-          }
+          ${variantFields}
         }
       }
     }`,
   );
   const cdcJson = await cdcResp.json();
-  const cdcProduct = cdcJson.data?.productVariants?.nodes?.[0]?.product ?? null;
-  const cdcVariants: any[] = cdcProduct?.variants?.nodes ?? [];
+  const cdcVariants: any[] = cdcJson.data?.productVariants?.nodes ?? [];
 
   const uniqueProductIds = Array.from(
     new Set(inputs.map((i) => i.productId).filter(Boolean)),
@@ -138,7 +133,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     ok: true,
     results,
     debug: {
-      cdcProductTitle: cdcProduct?.title ?? null,
+      cdcProductTitles: Array.from(
+        new Set(cdcVariants.map((v) => v.product?.title).filter(Boolean)),
+      ),
       cdcVariantCount: cdcVariants.length,
       cdcSwatchCount: cdcSwatchColorCodes.length,
       cdcColorCodes: cdcSwatchColorCodes,
