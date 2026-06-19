@@ -242,6 +242,23 @@ Note: `app._index.tsx`, `app.history.tsx`, `app.diagnose.tsx` use `// @ts-nochec
     Safe vs `-tag:picked` (Shopify `tag:` is exact-match). Builds clean; pending user retest.
   - Cleanup tracked: the now-dead `app._index` `action` (tag/logCut handlers) — all writes
     go to the resource route; safe to delete later.
+- **Fixed: silk swatch substitution (`substituteA` never resolved).** Verified live.
+  - `resolveSilkSubstitutes` builds two labels per silk swatch: **substituteA** = Crepe de
+    Chine swatch in the *ordered color*; **substituteB** = the *ordered quality* in color
+    101. substituteB worked; substituteA was always missing.
+  - Root cause (found via temp `[silk] debug` logging on a live cut): the CDC "By the Yard"
+    and "Swatch Sample" products **share SKU 41031**. The query did
+    `productVariants(first: 1, query: "sku:41031")` → locked onto the by-the-yard product →
+    pulled only by-the-yard variants → zero swatch samples → substituteA never found. (Color
+    codes were never the issue — CDC uses the same numeric scheme, 101–198.)
+  - Fix: query `productVariants(first: 250, query: "sku:41031")` to get ALL variants with
+    that SKU (both products), then `findSwatch` picks the Swatch Sample in the ordered color.
+    Verified: `cdcSwatchCount` 98, both labels print. Note: capped at 250 variants for that
+    SKU (~196 today across the 2 CDC products); revisit if a 3rd product ever shares it.
+- **Added: order note auto-opens on line activation.** The note modal now opens when a
+  cutter activates a line whose order has a note (effect on `activeLineId`), shown once per
+  order via `acknowledgedNotes`; the NOTE badge still reopens it. Removed the old scan-time
+  trigger so it can't double-pop (per user — wasted time).
 - Open threads:
   - **Hydration mismatch (pre-existing, separate):** timestamps render differently on
     server vs client (`toLocaleString()` → `Server: "6/11..." Client: "6/15..."`), forcing

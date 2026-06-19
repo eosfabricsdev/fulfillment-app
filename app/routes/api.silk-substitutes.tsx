@@ -107,40 +107,5 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     };
   });
 
-  // TEMP DIAGNOSTIC — remove after debugging substituteA (CDC-in-ordered-color).
-  // Shows what the CDC anchor lookup actually returned so we can see whether the
-  // CDC swatch variants carry color_code values matching the ordered colors.
-  const cdcSwatchColorCodes = cdcVariants
-    .filter(
-      (v) =>
-        norm(
-          v.selectedOptions?.find((o: any) => norm(o.name) === "fabric length")
-            ?.value,
-        ) === "swatch sample",
-    )
-    .map((v) => v.colorCode?.value ?? null);
-
-  // Raw sample of the first few CDC variants so we can see the actual option
-  // names/values and the color_code metafield as Shopify returns them.
-  const cdcSample = cdcVariants.slice(0, 5).map((v) => ({
-    title: v.title,
-    sku: v.sku,
-    selectedOptions: v.selectedOptions,
-    colorCode: v.colorCode?.value ?? null,
-  }));
-
-  return Response.json({
-    ok: true,
-    results,
-    debug: {
-      cdcProductTitles: Array.from(
-        new Set(cdcVariants.map((v) => v.product?.title).filter(Boolean)),
-      ),
-      cdcVariantCount: cdcVariants.length,
-      cdcSwatchCount: cdcSwatchColorCodes.length,
-      cdcColorCodes: cdcSwatchColorCodes,
-      requestedColors: inputs.map((i) => i.colorCode),
-      cdcSample,
-    },
-  });
+  return Response.json({ ok: true, results });
 };
