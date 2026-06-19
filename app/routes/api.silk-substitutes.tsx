@@ -125,6 +125,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     )
     .map((v) => v.colorCode?.value ?? null);
 
+  // Raw sample of the first few CDC variants so we can see the actual option
+  // names/values and the color_code metafield as Shopify returns them.
+  const cdcSample = cdcVariants.slice(0, 5).map((v) => ({
+    title: v.title,
+    sku: v.sku,
+    selectedOptions: v.selectedOptions,
+    colorCode: v.colorCode?.value ?? null,
+  }));
+
   return Response.json({
     ok: true,
     results,
@@ -134,6 +143,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       cdcSwatchCount: cdcSwatchColorCodes.length,
       cdcColorCodes: cdcSwatchColorCodes,
       requestedColors: inputs.map((i) => i.colorCode),
+      cdcSample,
     },
   });
 };
