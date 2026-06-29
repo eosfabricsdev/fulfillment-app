@@ -838,19 +838,6 @@ export default function CutListPage() {
     [cutListItems, pickedItems],
   );
 
-  const holdItems = useMemo(() => {
-    const seen = new Map<string, CutListItem>();
-    for (const item of cutListItems) {
-      if (item.hasHold) seen.set(item.lineItemId, item);
-    }
-    for (const item of pickedTodayItems) {
-      if (item.hasHold && !seen.has(item.lineItemId)) {
-        seen.set(item.lineItemId, item);
-      }
-    }
-    return Array.from(seen.values());
-  }, [cutListItems, pickedTodayItems]);
-
   const remainingByOrder = useMemo(() => {
     const counts = new Map<string, number>();
     for (const item of cutListItems) {
@@ -1474,6 +1461,42 @@ export default function CutListPage() {
     return false;
   }
 
+  // A roll end is a normal "fabric by yard" product sold as a fixed remnant via a
+  // "XX.XX Yard Piece" Fabric Length variant. The legacy `productType === "roll end"`
+  // signal is deprecated (roll ends now carry productType "fabric by yard"), so detect
+  // by the variant/fabric-length name only.
+  function isRollEnd(item: CutListItem): boolean {
+    if (item.variantTitle?.toLowerCase().includes("yard piece")) return true;
+    if (item.fabricLength?.toLowerCase().includes("yard piece")) return true;
+    return false;
+  }
+
+  // Unique order IDs whose ORIGINAL composition — every real line as submitted,
+  // INCLUDING lines already cut / marked ready-to-ship — fully matches `predicate`,
+  // and that still have at least one uncut line (something left to pick). Evaluated
+  // over the whole order, NOT the ready-to-ship-filtered cut list, so a mixed order
+  // whose other line type happens to be done never qualifies. Cutters handle truly
+  // single-type orders (all swatches / all roll ends) differently, so "only" must mean
+  // only-at-order-submit. Used by both the "Only Orders" counts and their filters so a
+  // count and its filtered list can't drift.
+  const getFullOrderOnlyIds = (
+    predicate: (item: CutListItem) => boolean,
+  ): Set<string> => {
+    const composition = new Map<string, CutListItem[]>();
+    for (const item of cutListItems) {
+      if (item.sku === VIRTUAL_SKU) continue;
+      if (!composition.has(item.orderId)) composition.set(item.orderId, []);
+      composition.get(item.orderId)!.push(item);
+    }
+    const result = new Set<string>();
+    composition.forEach((items, orderId) => {
+      const allMatch = items.every((item) => predicate(item));
+      const hasUncut = items.some((item) => !pickedItems.has(item.lineItemId));
+      if (allMatch && hasUncut) result.add(orderId);
+    });
+    return result;
+  };
+
   function isSilkSwatchNeedingSubstitute(item: CutListItem): boolean {
     if (!isSwatch(item)) return false;
     const title = item.productTitle?.toLowerCase() ?? "";
@@ -1766,7 +1789,8 @@ export default function CutListPage() {
     }
 
     if (currentFilter === "hold") {
-      return applyCustomerOnlySort(holdItems);
+      const holdListItems = cutListItemsVisible.filter((item) => item.hasHold);
+      return applyCustomerOnlySort(holdListItems);
     }
 
     if (currentFilter === "readyToShip") {
@@ -1826,55 +1850,18 @@ export default function CutListPage() {
     const sortedHeld = applySkippedSort(heldItems);
     const allItems = applyRushFirstSort(workingItems);
 
-    const buildStrictOrderMap = () => {
-      const fullOrderMap = new Map<string, CutListItem[]>();
-      for (const item of cutListItems) {
-        if (item.sku === VIRTUAL_SKU) continue;
-        if (hasReadyToShipTag(item)) continue;
-        if (!fullOrderMap.has(item.orderId)) fullOrderMap.set(item.orderId, []);
-        fullOrderMap.get(item.orderId)!.push(item);
-      }
-      return fullOrderMap;
-    };
-
     if (currentFilter === "rollEnds") {
-      const fullOrderMap = buildStrictOrderMap();
-      const rollEndOrders = new Set<string>();
-      fullOrderMap.forEach((items, orderId) => {
-        const allAreYardPiece = items.every((item) =>
-          item.variantTitle?.includes("Yard Piece"),
-        );
-        const hasUncut = items.some(
-          (item) => !pickedItems.has(item.lineItemId),
-        );
-        if (allAreYardPiece && hasUncut) rollEndOrders.add(orderId);
-      });
+      const rollEndOrders = getFullOrderOnlyIds(isRollEnd);
       return allItems.filter((item) => rollEndOrders.has(item.orderId));
     }
 
     if (currentFilter === "swatches") {
-      const fullOrderMap = buildStrictOrderMap();
-      const swatchOrders = new Set<string>();
-      fullOrderMap.forEach((items, orderId) => {
-        const allAreSwatches = items.every((item) => isSwatch(item));
-        const hasUncut = items.some(
-          (item) => !pickedItems.has(item.lineItemId),
-        );
-        if (allAreSwatches && hasUncut) swatchOrders.add(orderId);
-      });
+      const swatchOrders = getFullOrderOnlyIds(isSwatch);
       return allItems.filter((item) => swatchOrders.has(item.orderId));
     }
 
     if (currentFilter === "totalSwatches") {
       return allItems.filter((item) => isSwatch(item));
-    }
-
-    if (currentFilter === "multiple") {
-      return allItems.filter((item) =>
-        item.orderTags.some(
-          (t) => t.toLowerCase() === "multiple orders"
-        )
-      );
     }
 
     return [...sortedHeld, ...allItems];
@@ -1884,38 +1871,22 @@ export default function CutListPage() {
     const filteredCutListItems = cutListItems.filter(
       (item) => item.sku !== VIRTUAL_SKU && !hasReadyToShipTag(item),
     );
-    const uniqueOrders = new Set(filteredCutListItems.map((i) => i.orderId));
     const uncutItems = filteredCutListItems.filter(
       (item) => !pickedItems.has(item.lineItemId),
     );
-    const totalCuts = uncutItems.reduce(
-      (sum, item) => sum + Math.max(1, item.quantity),
-      0,
-    );
+    // "Total Orders to Pick": unique orders that still have at least one uncut
+    // line. Derived from uncutItems (not all items) so an order whose lines are
+    // all cut — but still lingering in the list — isn't counted.
+    const uniqueOrders = new Set(uncutItems.map((i) => i.orderId));
+    // "Total Cuts to Pick": one cut per uncut line item / SKU, NOT per unit of
+    // quantity (client request). A "5 yard" line is one cut, not five.
+    const totalCuts = uncutItems.length;
 
-    const orderMap = new Map<string, CutListItem[]>();
-    filteredCutListItems.forEach((item) => {
-      if (!orderMap.has(item.orderId)) {
-        orderMap.set(item.orderId, []);
-      }
-      orderMap.get(item.orderId)!.push(item);
-    });
-
-    let rollEndsOnlyCount = 0;
-    let swatchesOnlyCount = 0;
-
-    orderMap.forEach((items) => {
-      const allAreYardPiece = items.every((item) =>
-        item.variantTitle?.includes("Yard Piece"),
-      );
-      const allAreSwatches = items.every((item) => isSwatch(item));
-      const hasUncut = items.some(
-        (item) => !pickedItems.has(item.lineItemId),
-      );
-
-      if (allAreYardPiece && hasUncut) rollEndsOnlyCount++;
-      if (allAreSwatches && hasUncut) swatchesOnlyCount++;
-    });
+    // Roll-ends-only and swatches-only both use the strict original-composition rule
+    // (getFullOrderOnlyIds): only orders that were single-type AT ORDER SUBMIT, with at
+    // least one uncut line. A mixed order reduced to one type by cutting never counts.
+    const rollEndsOnlyCount = getFullOrderOnlyIds(isRollEnd).size;
+    const swatchesOnlyCount = getFullOrderOnlyIds(isSwatch).size;
 
     const cutLogItems = pickedTodayItems.filter((item) => {
       if (item.sku === VIRTUAL_SKU) return false;
@@ -1946,17 +1917,44 @@ export default function CutListPage() {
         .map((item) => item.orderId),
     );
 
-    const totalSwatchesCount = filteredCutListItems
-      .filter(
-        (item) => isSwatch(item) && !pickedItems.has(item.lineItemId),
-      )
-      .reduce((sum, item) => sum + Math.max(1, item.quantity), 0);
+    // "Total Swatches to Pick": one per uncut swatch LINE ITEM (not unit quantity),
+    // across every order — swatch-only or mixed. Excludes picked / ready-to-ship lines,
+    // so a swatch cut from anywhere drops off. Counting line items keeps this number
+    // equal to the rows shown in the totalSwatches filter list.
+    const totalSwatchesCount = filteredCutListItems.filter(
+      (item) => isSwatch(item) && !pickedItems.has(item.lineItemId),
+    ).length;
 
+    // "Local Pickup": unique orders tagged `local pickup` (17 line items still = 1).
+    // Built from cutListItemsVisible (excludes picked + ready-to-ship) so as lines are
+    // cut they drop to the Log, and once the whole order is cut it leaves this count for
+    // Ready to Ship — matching the filter list.
     const localPickupOrders = new Set(
-      filteredCutListItems
+      cutListItemsVisible
         .filter((item) =>
           item.orderTags.some((t) => t.toLowerCase() === "local pickup"),
         )
+        .map((item) => item.orderId),
+    );
+
+    // "Customers with Multiple Orders": one per UNIQUE customer flagged with the
+    // order-level `multiple orders` tag, regardless of how many orders / line items /
+    // units they have. Built from cutListItemsVisible (excludes picked + ready-to-ship)
+    // so a customer whose work is all done drops off, matching the filter list.
+    const multipleOrderCustomers = new Set(
+      cutListItemsVisible
+        .filter((item) =>
+          item.orderTags.some((t) => t.toLowerCase() === "multiple orders"),
+        )
+        .map((item) => item.customerId || "guest"),
+    );
+
+    // "Fulfillment Hold": unique orders on a Shopify native fulfillment hold (hasHold),
+    // same shape as Local Pickup. Built from cutListItemsVisible (excludes picked +
+    // ready-to-ship) so cut lines drop to the Log and a fully-cut order leaves the count.
+    const holdOrders = new Set(
+      cutListItemsVisible
+        .filter((item) => item.hasHold)
         .map((item) => item.orderId),
     );
 
@@ -1971,6 +1969,8 @@ export default function CutListPage() {
       totalSwatches: totalSwatchesCount,
       readyToShip: readyToShipOrders.size,
       localPickup: localPickupOrders.size,
+      multipleOrderCustomers: multipleOrderCustomers.size,
+      hold: holdOrders.size,
     };
   };
 
@@ -2670,16 +2670,8 @@ export default function CutListPage() {
 >
   <s-clickable onClick={() => setCurrentFilter("multiple")}>
     <s-stack gap="small">
-      <s-text color="subdued">Multiple Orders</s-text>
-      <s-text type="strong">
-        {
-          cutListItems.filter((item) =>
-            item.orderTags.some(
-              (t) => t.toLowerCase() === "multiple orders"
-            )
-          ).length
-        }
-      </s-text>
+      <s-text color="subdued">Customers with Multiple Orders</s-text>
+      <s-text type="strong">{stats.multipleOrderCustomers}</s-text>
     </s-stack>
   </s-clickable>
 </s-box>
@@ -2712,7 +2704,7 @@ export default function CutListPage() {
     <s-stack gap="small">
       <s-text color="subdued">Fulfillment Hold</s-text>
       <s-text type="strong" tone="critical">
-        {holdItems.length}
+        {stats.hold}
       </s-text>
     </s-stack>
   </s-clickable>
@@ -3316,7 +3308,7 @@ const cellStyle = {
                       ) : readyToPrint.has(item.lineItemId) ? (
                         <s-stack gap="small">
                           <s-badge tone="success">✓ Scan verified</s-badge>
-                          {item.productType?.toLowerCase() === "roll end" ? (
+                          {isRollEnd(item) ? (
                             alreadyPrinted ? (
                               <s-button
                                 variant="primary"
