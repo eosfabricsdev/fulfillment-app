@@ -838,6 +838,24 @@ export default function CutListPage() {
     [cutListItems, pickedItems],
   );
 
+  // Held line items, gathered from BOTH the cut list and the picked-today set. A
+  // fulfillment hold can sit on an order in any cut state: still-being-cut orders come
+  // from cutListItems, but a FULLY-cut held order is tagged `picked` (so the main query
+  // excludes it) and only appears in pickedTodayItems. A held order can't ship, so it
+  // must stay visible here even when fully cut — hence both sources (deduped by line).
+  const holdItems = useMemo(() => {
+    const seen = new Map<string, CutListItem>();
+    for (const item of cutListItems) {
+      if (item.hasHold) seen.set(item.lineItemId, item);
+    }
+    for (const item of pickedTodayItems) {
+      if (item.hasHold && !seen.has(item.lineItemId)) {
+        seen.set(item.lineItemId, item);
+      }
+    }
+    return Array.from(seen.values());
+  }, [cutListItems, pickedTodayItems]);
+
   const remainingByOrder = useMemo(() => {
     const counts = new Map<string, number>();
     for (const item of cutListItems) {
@@ -1789,8 +1807,9 @@ export default function CutListPage() {
     }
 
     if (currentFilter === "hold") {
-      const holdListItems = cutListItemsVisible.filter((item) => item.hasHold);
-      return applyCustomerOnlySort(holdListItems);
+      // holdItems spans the cut list AND picked-today, so fully-cut held orders (tagged
+      // `picked`, absent from the main query) still show here instead of vanishing.
+      return applyCustomerOnlySort(holdItems);
     }
 
     if (currentFilter === "readyToShip") {
@@ -1878,9 +1897,15 @@ export default function CutListPage() {
     // line. Derived from uncutItems (not all items) so an order whose lines are
     // all cut — but still lingering in the list — isn't counted.
     const uniqueOrders = new Set(uncutItems.map((i) => i.orderId));
-    // "Total Cuts to Pick": one cut per uncut line item / SKU, NOT per unit of
-    // quantity (client request). A "5 yard" line is one cut, not five.
-    const totalCuts = uncutItems.length;
+    // "Total Cuts to Pick": one cut per uncut line item (NOT unit quantity — a "5 yard"
+    // line is one cut), EXCEPT an order's swatches all bundle into a single cut. This
+    // mirrors the list, which renders all of an order's swatches as one bundle row, so
+    // the count equals the number of rows the cutter sees.
+    const nonSwatchCuts = uncutItems.filter((item) => !isSwatch(item)).length;
+    const swatchBundleOrders = new Set(
+      uncutItems.filter((item) => isSwatch(item)).map((item) => item.orderId),
+    );
+    const totalCuts = nonSwatchCuts + swatchBundleOrders.size;
 
     // Roll-ends-only and swatches-only both use the strict original-composition rule
     // (getFullOrderOnlyIds): only orders that were single-type AT ORDER SUBMIT, with at
@@ -1917,13 +1942,12 @@ export default function CutListPage() {
         .map((item) => item.orderId),
     );
 
-    // "Total Swatches to Pick": one per uncut swatch LINE ITEM (not unit quantity),
-    // across every order — swatch-only or mixed. Excludes picked / ready-to-ship lines,
-    // so a swatch cut from anywhere drops off. Counting line items keeps this number
-    // equal to the rows shown in the totalSwatches filter list.
-    const totalSwatchesCount = filteredCutListItems.filter(
-      (item) => isSwatch(item) && !pickedItems.has(item.lineItemId),
-    ).length;
+    // "Total Swatches to Pick": one per swatch BUNDLE (an order's swatches are bundled
+    // into a single cut row, regardless of how many swatch SKUs), across every order —
+    // swatch-only or mixed. This is the same per-order set used for Total Cuts, so the
+    // number equals the bundle rows shown in the totalSwatches filter list. Excludes
+    // picked / ready-to-ship lines, so a swatch cut from anywhere drops off.
+    const totalSwatchesCount = swatchBundleOrders.size;
 
     // "Local Pickup": unique orders tagged `local pickup` (17 line items still = 1).
     // Built from cutListItemsVisible (excludes picked + ready-to-ship) so as lines are
@@ -1949,14 +1973,11 @@ export default function CutListPage() {
         .map((item) => item.customerId || "guest"),
     );
 
-    // "Fulfillment Hold": unique orders on a Shopify native fulfillment hold (hasHold),
-    // same shape as Local Pickup. Built from cutListItemsVisible (excludes picked +
-    // ready-to-ship) so cut lines drop to the Log and a fully-cut order leaves the count.
-    const holdOrders = new Set(
-      cutListItemsVisible
-        .filter((item) => item.hasHold)
-        .map((item) => item.orderId),
-    );
+    // "Fulfillment Hold": unique orders on a Shopify native fulfillment hold (hasHold).
+    // Counted from holdItems (cut list + picked-today) so held orders stay counted in
+    // any cut state — including FULLY-cut ones, which are tagged `picked` and therefore
+    // absent from the main cut-list query. A held order can't ship, so it must not vanish.
+    const holdOrders = new Set(holdItems.map((item) => item.orderId));
 
     return {
       rushOrders: rushOrders.length,

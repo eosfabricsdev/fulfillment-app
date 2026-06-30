@@ -107,6 +107,36 @@ tracks cut progress. It also logs per-cutter productivity.
   which anchors on SKU `41031` (CDC) and matches by `color_code` metafield.
 - **SKU anchor times** (localStorage `skuAnchorTimes`) keep same-fabric items grouped
   in sort order even as new orders arrive.
+- **Filter-card count conventions (audited 2026-06-29 against client intent).** Each
+  summary card has a deliberate unit — don't "simplify" them to all match:
+  - *Total Orders to Pick* — unique orders with ≥1 **uncut** line (`uniqueOrders` from
+    `uncutItems`, not all items).
+  - *Total Cuts to Pick* — **line items**, not unit quantity; BUT an order's swatches
+    bundle into **one** cut (`nonSwatchCuts + swatchBundleOrders.size`). Mirrors the list,
+    which renders all of an order's swatches as a single bundle row (the lone `return null`
+    in the render map).
+  - *Total Swatches to Pick* — swatch **bundles** = `swatchBundleOrders.size` (one per
+    order with an uncut swatch), reused from Total Cuts so they can't drift.
+  - *Roll Ends Only* / *Swatches Only* — unique orders whose **original composition** is
+    entirely that type, via `getFullOrderOnlyIds(predicate)`. "Original" = evaluated over
+    the full order incl. cut/ready-to-ship lines, so a mixed order reduced to one type by
+    cutting never qualifies. A **roll end is detected by `isRollEnd()`** (variant/fabric
+    length contains "yard piece") — NOT `productType === "roll end"`, which is a
+    **deprecated** field (roll ends now carry productType "fabric by yard"). Same fix was
+    applied to the roll-end **print button**.
+  - *Customers with Multiple Orders* (renamed from "Multiple Orders") — unique **customers**
+    (`customerId || "guest"`) tagged `multiple orders`.
+  - *Local Pickup* — unique orders tagged `local pickup`, from `cutListItemsVisible`.
+  - *Fulfillment Hold* — unique held orders, detected by **native `hasHold`** (Shopify
+    `fulfillmentHolds`), NOT a tag (no hold tag exists). Sourced from `holdItems` =
+    cut list **+ picked-today**, so a **fully-cut** held order (tagged `picked`, hence
+    excluded from the main query) still shows — a held order can't ship, so unlike Local
+    Pickup it must NOT drop off when fully cut.
+  - *Ready to Ship* — unique orders fully `picked` **or** with a per-line `ready-to-ship`
+    tag (single items are promoted manually — intentional), excl. holds / READY_FOR_PICKUP.
+  - *Orders Cut Log* — unique **partially-picked** orders; *Items Cut Log* — cut **line
+    items** in those orders. (A partially-picked order shows in both Total Orders to Pick
+    and Orders Cut Log by design.)
 
 ## Loader queries (app._index)
 
@@ -149,13 +179,64 @@ Note: `app._index.tsx`, `app.history.tsx`, `app.diagnose.tsx` use `// @ts-nochec
 - Leftover debug logging: `console.log("[refresh] …")` in the 30s refresh effect
   (~[app._index.tsx:1222](app/routes/app._index.tsx#L1222)) and `[silk] …` logs in the
   substitute resolver. Probably should be removed.
-- `getFilteredItems()` has a duplicated/unreachable `multiple` branch (handled early,
-  then again later).
+- ~~`getFilteredItems()` has a duplicated/unreachable `multiple` branch~~ — **removed
+  2026-06-29** (along with the dead `buildStrictOrderMap` + `orderMap` once the count
+  helpers were centralized).
+- **Order visibility is capped at the last ~60 days** because the app has `read_orders`
+  but not `read_all_orders` — older orders never reach the loader (e.g. a >90-day rush
+  order shows 0 on the cut list / Rush card). Fix = request the protected `read_all_orders`
+  scope (Shopify approval + merchant re-consent), then add it to `shopify.app.toml`.
 
 ## Session Log
 
 > Newest first. One entry per working session. Keep it short: what changed, why, and
 > any thread the next session should pick up.
+
+### 2026-06-29
+- **Full audit + fix of every summary filter-card count**, card by card against client
+  intent. New durable reference: the *Filter-card count conventions* bullet in Core
+  concepts — read that before touching any card count. Highlights of what changed:
+  - *Total Orders to Pick* → unique orders with ≥1 uncut line (`uniqueOrders` now derived
+    from `uncutItems`; was over-counting fully-cut lingering orders).
+  - *Total Cuts to Pick* → line items not unit quantity; **swatches bundle per order**
+    (`nonSwatchCuts + swatchBundleOrders.size`) to match the list's single bundle row.
+    Caught live: card showed 19 vs 17 visible rows because of swatch bundling.
+  - *Total Swatches to Pick* → swatch **bundles** (`swatchBundleOrders.size`), reused from
+    Total Cuts. Caught live: 11 line items vs 9 bundles.
+  - *Roll Ends Only* + *Swatches Only* → strict **original-composition** rule via new
+    generic `getFullOrderOnlyIds(predicate)` (a mixed order reduced to one type by cutting
+    must NOT qualify — cutters handle single-type orders differently "from order submit").
+  - New `isRollEnd()` helper: roll end = variant/fabric length contains **"yard piece"**.
+    The old `productType === "roll end"` signal is **deprecated** (client confirmed via
+    Shopify screenshot — roll ends now have productType "fabric by yard"). **Also fixed a
+    real bug**: the roll-end **print button** used the dead productType check, so roll ends
+    weren't getting their special print flow. Now uses `isRollEnd()`.
+  - *Multiple Orders* → renamed **"Customers with Multiple Orders"**, count = unique
+    customers (was line items over raw `cutListItems`). Removed the dead duplicate
+    `multiple` filter branch.
+  - *Local Pickup* + *Fulfillment Hold* → unique orders, sourced to match their lists.
+  - *Items/Orders Cut Log*, *Ready to Ship* → verified already-correct, left as-is
+    (Ready to Ship keeps the per-line `ready-to-ship` OR clause — single items are
+    promoted manually on purpose).
+- **Bug fixed (regression I introduced, then caught via live test + the diagnose route):
+  fully-cut order put ON HOLD vanished from everywhere.** Root cause chain: a fully-cut
+  order is tagged `picked` → excluded from the main query (`-tag:picked`); Ready to Ship
+  excludes holds (`!hasHold`); and my first Hold-card rewrite sourced only
+  `cutListItemsVisible` (derived from the main query) → the order had nowhere to appear.
+  Fix: restored the `holdItems` memo spanning **cutListItems + pickedTodayItems**, so held
+  orders show in any cut state. Key lesson now in Core concepts: **a held order must NOT
+  drop off when fully cut** (it can't ship) — Hold is NOT "the same as Local Pickup" in
+  that respect, even though the count is still unique-orders. `app.diagnose?order=N` was
+  the decisive tool (showed main query returned 0 for the held order).
+- Verified live by user: held orders (cut and uncut) show correctly; move-to-cut-list
+  bumps Total Cuts by exactly +1 (the line-item change makes it +1 not +quantity);
+  move-to-ready-to-ship adds the order to Ready to Ship.
+- All changes build clean (`npm run build`). **Uncommitted — user will push.**
+- Open threads:
+  - **`read_all_orders` scope** not yet added (Rush shows 5 vs 6 because the 6th is
+    >90 days old, past the 60-day `read_orders` window). User will do the scope request
+    later. See Known quirks.
+  - Hydration-mismatch + leftover `[refresh]`/`[silk]` debug logs still untouched.
 
 ### 2026-06-17
 - **Context recovery / onboarding.** No prior memory or CLAUDE.md existed, so prior
