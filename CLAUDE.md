@@ -192,6 +192,26 @@ Note: `app._index.tsx`, `app.history.tsx`, `app.diagnose.tsx` use `// @ts-nochec
 > Newest first. One entry per working session. Keep it short: what changed, why, and
 > any thread the next session should pick up.
 
+### 2026-07-01
+- **Fixed: loader hitting Shopify's single-query cost limit** (client saw *"Query cost is
+  1487, which exceeds the single query max cost limit (1000)"* ~7pm ET; fine by morning).
+  - Cause: `queryOrders` fetched `orders(first: 250)` with `lineItems(first: 50)` + nested
+    variant/image/2 metafields/fulfillmentOrders in ONE query. Cost scales with matched
+    orders, so it crossed 1000 when volume was high. The intermittent evening-only pattern
+    fits the **picked-today** query (`tag:picked … -fulfillment_status:fulfilled`): cut
+    orders are never fulfilled by the app, so that set **accumulates through the day** and
+    **drains overnight** when EasyScan fulfills → cost high at 7pm, low by morning.
+  - Fix: **cursor pagination in `queryOrders`** — loops `first: 50` pages via `after`/
+    `endCursor` until `hasNextPage` is false, stitches into one `edges[]`. Each page is a
+    small fixed-cost query, so the single-query ceiling can't be hit regardless of volume.
+    Return shape unchanged (`{ edges }`), callers untouched. `MAX_PAGES = 60` safety stop.
+    Also removes the old silent **250-order cap**. Server-side only — the cutter still sees
+    one continuous list (NOT UI paging). Builds clean.
+  - Note: this fixes the *single-query cost* limit permanently. The separate *rate-limit*
+    bucket (points/sec across all requests) is a far higher ceiling that degrades
+    gracefully (throttle+retry); only relevant at ~50–100× current scale, where Shopify
+    **bulk operations** would be the tool. Not needed now.
+
 ### 2026-06-29
 - **Full audit + fix of every summary filter-card count**, card by card against client
   intent. New durable reference: the *Filter-card count conventions* bullet in Core

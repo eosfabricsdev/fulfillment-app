@@ -217,11 +217,21 @@ function toCutListItems(
   return items;
 }
 
+// Fetches ALL orders matching `query` via cursor pagination. Each page is a small,
+// fixed-cost GraphQL request, so the loader never trips Shopify's single-query cost
+// ceiling (1000 points) no matter how many orders match — and it no longer silently
+// caps at 250. Pages are stitched into one edges[] array, so callers are unchanged.
 async function queryOrders(admin: any, query: string) {
-  const response = await admin.graphql(
-    `#graphql
-    query GetOrders($first: Int!, $query: String!) {
-      orders(first: $first, query: $query) {
+  const PAGE_SIZE = 50;
+  const MAX_PAGES = 60; // safety stop (~3000 orders) so a bad cursor can't loop forever
+  const allEdges: any[] = [];
+  let after: string | null = null;
+
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const response = await admin.graphql(
+      `#graphql
+    query GetOrders($first: Int!, $query: String!, $after: String) {
+      orders(first: $first, query: $query, after: $after) {
         edges {
           node {
             id
@@ -284,22 +294,30 @@ async function queryOrders(admin: any, query: string) {
         }
         pageInfo {
           hasNextPage
-          hasPreviousPage
-          startCursor
           endCursor
         }
       }
     }`,
-    {
-      variables: {
-        first: 250,
-        query,
+      {
+        variables: {
+          first: PAGE_SIZE,
+          query,
+          after,
+        },
       },
-    },
-  );
+    );
 
-  const json = await response.json();
-  return json.data?.orders || { edges: [], pageInfo: null };
+    const json = await response.json();
+    const orders = json.data?.orders;
+    if (!orders) break;
+
+    allEdges.push(...(orders.edges ?? []));
+
+    if (!orders.pageInfo?.hasNextPage) break;
+    after = orders.pageInfo.endCursor;
+  }
+
+  return { edges: allEdges };
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
