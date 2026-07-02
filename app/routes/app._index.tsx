@@ -321,7 +321,7 @@ async function queryOrders(admin: any, query: string) {
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { admin } = await authenticate.admin(request);
+  const { admin, session } = await authenticate.admin(request);
 
   const mainOrdersResult = await queryOrders(
     admin,
@@ -370,7 +370,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   return {
     cutListItems,
     pickedTodayItems,
-    pageInfo: mainOrdersResult.pageInfo,
+    shop: session.shop,
     staffMember,
     employeeName: staffMember?.name || "Unknown",
   };
@@ -696,7 +696,14 @@ export default function CutListPage() {
     });
   }, [data.cutListItems, data.pickedTodayItems]);
 
-  const [pageInfo] = useState<any>(data.pageInfo || null);
+  // Build a real Shopify admin URL for a resource so its link can open in a NEW browser
+  // tab (target="_blank"). We can't reuse the `shopify://admin/...` App Bridge deep links
+  // for this — those drive the parent admin (stealing the cutter's place), and the
+  // shopify:// scheme won't resolve in a fresh tab. The full admin URL does.
+  const storeHandle = (data.shop || "").replace(".myshopify.com", "");
+  const adminUrl = (resource: "products" | "orders" | "customers", id: string) =>
+    `https://admin.shopify.com/store/${storeHandle}/${resource}/${id}`;
+
   const [loading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [pickedItems, setPickedItems] = useState<Set<string>>(new Set());
@@ -3081,7 +3088,7 @@ const cellStyle = {
 >
                         <s-clickable onClick={() => setActiveLineId(item.lineItemId)}>
                           {item.customerId ? (
-                            <s-link href={`shopify://admin/customers/${customerIdNum}`}>
+                            <s-link href={adminUrl("customers", customerIdNum)} target="_blank">
                               {item.customerName}
                             </s-link>
                           ) : (
@@ -3132,7 +3139,7 @@ const cellStyle = {
       <s-badge tone="caution">📝 NOTE</s-badge>
     </s-clickable>
   )}
-  <s-link href={`shopify://admin/orders/${orderIdNum}`}>
+  <s-link href={adminUrl("orders", orderIdNum)} target="_blank">
     {item.orderName}
   </s-link>
 </s-stack>
@@ -3157,7 +3164,7 @@ const cellStyle = {
                           {isBundleRow ? (
                             <s-text color="subdued">—</s-text>
                           ) : (
-                            <s-link href={`shopify://admin/products/${productIdNum}`}>
+                            <s-link href={adminUrl("products", productIdNum)} target="_blank">
                               {item.productTitle}
                             </s-link>
                           )}
@@ -3238,7 +3245,7 @@ const cellStyle = {
                           ) : (
                             <s-stack gap="small">
                               <s-stack gap="small" direction="inline">
-                                <s-link href={`shopify://admin/products/${productIdNum}`}>
+                                <s-link href={adminUrl("products", productIdNum)} target="_blank">
                                   {item.sku || "-"}
                                 </s-link>
                                 {getVariantTypeBadge(item.variantTitle)}
@@ -3482,7 +3489,7 @@ const cellStyle = {
               const productIdNum = li.product.id.split("/").pop();
               return (
                 <s-text key={li.id}>
-                  <s-link href={`shopify://admin/products/${productIdNum}`}>
+                  <s-link href={adminUrl("products", productIdNum)} target="_blank">
                     {li.title} — {li.sku}
                   </s-link>
                 </s-text>

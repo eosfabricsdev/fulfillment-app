@@ -137,8 +137,13 @@ tracks cut progress. It also logs per-cutter productivity.
   - *Orders Cut Log* — unique **partially-picked** orders; *Items Cut Log* — cut **line
     items** in those orders. (A partially-picked order shows in both Total Orders to Pick
     and Orders Cut Log by design.)
-
-## Loader queries (app._index)
+- **Reference links open in a NEW TAB, on purpose.** Product/SKU/order/customer links use
+  real `https://admin.shopify.com/store/<handle>/...` URLs (built by `adminUrl()`, from
+  `data.shop`) with `target="_blank"` — NOT `shopify://admin/...` App Bridge deep links.
+  Deep links drive the *parent* admin, which navigates the whole embedded app away and
+  makes the cutter lose their place mid-cut (client complaint). Don't "simplify" these
+  back to `shopify://` — and note the shopify:// scheme can't resolve in a fresh tab
+  anyway, so a new tab requires the full https URL.
 
 - Main list: `(fulfillment_status:unfulfilled OR on_hold OR partial) -status:cancelled -tag:picked -tag:'picked by EasyScan'`
 - Picked today: `(tag:picked OR tag:'partially picked') -fulfillment_status:fulfilled`
@@ -191,6 +196,25 @@ Note: `app._index.tsx`, `app.history.tsx`, `app.diagnose.tsx` use `// @ts-nochec
 
 > Newest first. One entry per working session. Keep it short: what changed, why, and
 > any thread the next session should pick up.
+
+### 2026-07-02
+- **Reference links now open in a new tab** (client request — cutters were losing their
+  place: links took over the app frame, then they had to reload and re-find their spot).
+  - Cause: links were `shopify://admin/...` App Bridge deep links, which navigate the
+    *parent* Shopify admin (steals the embedded app's frame).
+  - Fix: new `adminUrl(resource, id)` helper builds `https://admin.shopify.com/store/
+    <handle>/...` from `data.shop` (added `session.shop` to the loader return); all 5 links
+    (customer, order, 3× product/SKU) switched to it with `target="_blank"`. See the new
+    "Reference links open in a NEW TAB" bullet in Core concepts. Verified by user: customer/
+    order/product/SKU all open a fresh tab, cut-list tab stays put; note + picture modals
+    unaffected.
+  - Also cleaned up the dead `pageInfo` (loader return + unused state) left by the 2026-07-01
+    pagination change (`queryOrders` no longer returns pageInfo).
+- Pagination fix from 2026-07-01 verified in prod: pre/post counts identical (12/12), list
+  loads fully. Real proof (no cost error at ~7pm peak) is the ongoing watch.
+- Builds clean. **Uncommitted — user will push.**
+- Open thread: `MAX_PAGES = 60` in `queryOrders` caps each query at ~3000 orders (safety
+  net vs runaway cursor). Fine at current scale (~51); bump to ~200 if volume ever grows.
 
 ### 2026-07-01
 - **Fixed: loader hitting Shopify's single-query cost limit** (client saw *"Query cost is
