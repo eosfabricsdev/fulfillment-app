@@ -1,7 +1,13 @@
 // @ts-nocheck
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { useLoaderData, useRevalidator } from "react-router";
+import {
+  isRouteErrorResponse,
+  useLoaderData,
+  useRevalidator,
+  useRouteError,
+} from "react-router";
+import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 
@@ -1196,8 +1202,28 @@ export default function CutListPage() {
   const previewImageRef = useRef(previewImage);
   previewImageRef.current = previewImage;
 
+  // Force App Bridge to mint a FRESH embedded session token before each background
+  // revalidation, then revalidate. Shopify session tokens expire ~60s; the old code
+  // revalidated instantly on focus/interval, so a request could go out on an expired
+  // token → the loader's authenticate.admin rejects it → the white "401 Unauthorized"
+  // page. Priming the token first closes that race. `shopify.idToken()` is the App
+  // Bridge call that returns (and refreshes) the current token.
+  const primeTokenAndRevalidate = useCallback(async () => {
+    if (revalidatorRef.current.state !== "idle") return;
+    try {
+      await window.shopify?.idToken?.();
+    } catch {
+      // ignore — revalidate anyway; the ErrorBoundary auto-recovers a true 401
+    }
+    revalidatorRef.current.revalidate();
+  }, []);
+
   useEffect(() => {
     const refreshInterval = setInterval(() => {
+      // Don't refresh a backgrounded tab — nobody's watching, and the token has
+      // likely lapsed, so the request would just 401. It resumes on return below.
+      if (document.hidden) return;
+
       const activeEl = document.activeElement as
         | HTMLInputElement
         | HTMLTextAreaElement
@@ -1212,35 +1238,22 @@ export default function CutListPage() {
         activeEl?.getAttribute("contenteditable") === "true";
       const isTyping = hasText || isContentEditable;
 
-      console.log("[refresh] tick", {
-        activeTag: activeEl?.tagName,
-        activeValue: isInputElement
-          ? (activeEl as HTMLInputElement).value?.slice(0, 20)
-          : undefined,
-        isTyping,
-        state: revalidatorRef.current.state,
-        modal: showProductCountModalRef.current,
-        preview: !!previewImageRef.current,
-      });
-
       if (isTyping) return;
       if (revalidatorRef.current.state !== "idle") return;
       if (showProductCountModalRef.current || !!previewImageRef.current) return;
 
-      console.log("[refresh] calling revalidate");
-      revalidatorRef.current.revalidate();
+      primeTokenAndRevalidate();
     }, 30000);
 
     return () => clearInterval(refreshInterval);
-  }, []);
+  }, [primeTokenAndRevalidate]);
 
   useEffect(() => {
     const onVisible = () => {
-      if (
-        document.visibilityState === "visible" &&
-        revalidator.state === "idle"
-      ) {
-        revalidator.revalidate();
+      // Tab just became visible / regained focus — the cutter is back. Prime a fresh
+      // token first so this immediate refresh doesn't race an expired one.
+      if (document.visibilityState === "visible") {
+        primeTokenAndRevalidate();
       }
     };
     document.addEventListener("visibilitychange", onVisible);
@@ -1249,11 +1262,28 @@ export default function CutListPage() {
       document.removeEventListener("visibilitychange", onVisible);
       window.removeEventListener("focus", onVisible);
     };
-  }, [revalidator]);
+  }, [primeTokenAndRevalidate]);
 
+  // On a successful load, clear the 401-recovery guard so a future expired-session
+  // 401 gets its own one-shot auto-reload (see ErrorBoundary at the bottom of the file).
   useEffect(() => {
-    setLastUpdated(new Date());
-  }, [data.cutListItems, data.pickedTodayItems]);
+    try {
+      window.sessionStorage.removeItem("cutlist-401-reload");
+    } catch {}
+  }, []);
+
+  // Reset the "Last updated" counter whenever a background revalidation COMPLETES — not
+  // only when the data happened to change. This makes it an honest "seconds since we last
+  // checked Shopify", so a cutter watching a busy-but-static screen still sees it tick
+  // 1→30→1 as proof the list is live-polling (new orders drop in the moment they exist).
+  // Detects the revalidator returning to idle after a load.
+  const prevRevalidatorState = useRef(revalidator.state);
+  useEffect(() => {
+    if (prevRevalidatorState.current !== "idle" && revalidator.state === "idle") {
+      setLastUpdated(new Date());
+    }
+    prevRevalidatorState.current = revalidator.state;
+  }, [revalidator.state]);
 
   function submitTagsAdd(orderId: string, tags: string[]) {
     markOrderMutated(orderId);
@@ -3669,4 +3699,42 @@ const cellStyle = {
       </s-modal>
     </s-page>
   );
+}
+
+// Self-heals the embedded-session 401 (the bare white "401 Unauthorized" page a cutter
+// would otherwise be stuck on until a manual reload). An expired session token — or a
+// transient DB blip that fails the session read — makes the loader's authenticate.admin
+// reject the request as 401. Here we reload ONCE to re-run Shopify's token exchange,
+// guarded by a sessionStorage flag so a persistent 401 can't loop (the guard is cleared
+// on the next successful load). Any non-401 error falls through to Shopify's own boundary.
+export function ErrorBoundary() {
+  const error = useRouteError();
+  const is401 = isRouteErrorResponse(error) && error.status === 401;
+
+  useEffect(() => {
+    if (!is401) return;
+    const KEY = "cutlist-401-reload";
+    let alreadyTried = false;
+    try {
+      alreadyTried = window.sessionStorage.getItem(KEY) === "1";
+      if (alreadyTried) {
+        window.sessionStorage.removeItem(KEY);
+      } else {
+        window.sessionStorage.setItem(KEY, "1");
+      }
+    } catch {}
+    if (!alreadyTried) window.location.reload();
+  }, [is401]);
+
+  if (is401) {
+    return (
+      <s-page heading="Reconnecting…">
+        <s-section>
+          <s-text>Session expired — reloading the cut list…</s-text>
+        </s-section>
+      </s-page>
+    );
+  }
+
+  return boundary.error(error);
 }

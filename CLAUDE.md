@@ -59,7 +59,17 @@ tracks cut progress. It also logs per-cutter productivity.
   revalidator doesn't overwrite optimistic changes. See the merge logic in the big
   `useEffect` near the top of the component.
 - **Auto-refresh:** revalidates every **30s** (skipped while typing / modal open /
-  preview open) and on tab focus/visibility.
+  preview open / **tab backgrounded** `document.hidden`) and on tab focus/visibility.
+  **Each revalidation primes a fresh App Bridge session token first**
+  (`window.shopify.idToken()` in `primeTokenAndRevalidate`) so a background request never
+  goes out on an expired ~60s token — that expired-token request is what produced the bare
+  white **"401 Unauthorized"** page after a station sat idle. A self-healing `ErrorBoundary`
+  (bottom of app._index) auto-reloads **once** on any 401 as a safety net (guarded by a
+  `cutlist-401-reload` sessionStorage flag, cleared on next good load). The **"Last updated"
+  counter resets on every completed revalidation** (honest "seconds since last check", via a
+  revalidator-state effect), NOT just on data change — so a visible-but-quiet screen still
+  ticks 1→30→1, proving it's live-polling. A *visible* screen never stops polling; only a
+  backgrounded tab pauses (and resumes on return).
 - **The one piece of persistent app data is `CutEvent`** (cut log), written by the
   `logCut` action intent. Everything else is derived from Shopify.
 - **The app never fulfills orders** — it only writes order *tags* (`tagsAdd`/`tagsRemove`
@@ -181,9 +191,9 @@ Note: `app._index.tsx`, `app.history.tsx`, `app.diagnose.tsx` use `// @ts-nochec
 
 ## Known quirks / cleanup candidates
 
-- Leftover debug logging: `console.log("[refresh] …")` in the 30s refresh effect
-  (~[app._index.tsx:1222](app/routes/app._index.tsx#L1222)) and `[silk] …` logs in the
-  substitute resolver. Probably should be removed.
+- Leftover debug logging: ~~`console.log("[refresh] …")` in the 30s refresh effect~~
+  **removed 2026-07-09** while reworking that effect; `[silk] …` logs in the substitute
+  resolver still remain and could be removed.
 - ~~`getFilteredItems()` has a duplicated/unreachable `multiple` branch~~ — **removed
   2026-06-29** (along with the dead `buildStrictOrderMap` + `orderMap` once the count
   helpers were centralized).
@@ -196,6 +206,39 @@ Note: `app._index.tsx`, `app.history.tsx`, `app.diagnose.tsx` use `// @ts-nochec
 
 > Newest first. One entry per working session. Keep it short: what changed, why, and
 > any thread the next session should pick up.
+
+### 2026-07-09
+- **Fixed: intermittent bare white "401 Unauthorized" page** (client report — cutter
+  occasionally gets it, reload fixes it, disrupts cutting).
+  - Diagnosis: 401 = failed auth on the app's own **loader** request (not a tag write —
+    we never throw "401 Unauthorized"; it's the library). Two contributing causes:
+    1. **Expired embedded session token.** Shopify session tokens live ~60s; the app
+       revalidated instantly on focus/visibility + every 30s, so after a station sat idle
+       (tab backgrounded / asleep) a background request could fire on an expired token →
+       loader `authenticate.admin` rejects → white 401. Reload re-runs token exchange.
+    2. **Supabase capacity incident (Jul 6–8).** `DATABASE_URL` is on Supabase
+       (`pooler.supabase`), and sessions live in that Postgres (`PrismaSessionStorage`).
+       During the incident, session reads/token-exchange writes could fail intermittently
+       → same 401. Project `bvvmmhekdgskeilczeuy` is on Postgres **17.6.1.063**, which is
+       BELOW the `17.6.1.121` threshold Supabase flagged as most affected (older = narrower
+       instance types). **Open thread: upgrade Postgres to 17.6.1.121+** off-hours (brief
+       restart/downtime) from the dashboard infra settings — no code/env change.
+  - App-side fix (`app._index.tsx`), verified by user in the test store:
+    - New `primeTokenAndRevalidate()` — `await window.shopify.idToken()` (forces a fresh
+      token) BEFORE every 30s / focus / visibility revalidation. Verified: 225s+ idle →
+      return refreshes cleanly, no 401.
+    - Skip the 30s tick while `document.hidden` (backgrounded); resumes on return.
+    - Self-healing `ErrorBoundary` (bottom of file): auto-reload ONCE on a 401
+      (`cutlist-401-reload` sessionStorage guard vs loop), else defer to `boundary.error`.
+      Low-risk safety net for any residual/DB-blip 401; not directly reproducible in dev.
+    - Made the **"Last updated" counter reset on every completed revalidation** (was only
+      on data change), after the client asked "if the cutter stays on screen, is it still
+      updating?" — it always WAS polling; the counter just looked frozen when quiet. Now it
+      ticks 1→30→1 on a visible screen as live proof. Verified by user.
+    - Removed the `[refresh]` debug logs.
+  - See the updated **Auto-refresh** bullet in Core concepts for the durable behavior.
+- Builds clean. **Uncommitted — user will push.** After push, real confirmation is a day
+  of live cutter use (embedded-auth timing doesn't fully reproduce in a dev tunnel).
 
 ### 2026-07-02
 - **Reference links now open in a new tab** (client request — cutters were losing their
