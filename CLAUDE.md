@@ -58,18 +58,31 @@ tracks cut progress. It also logs per-cutter productivity.
   mutation; `recentMutationsRef` protects an order for **60s** so the background
   revalidator doesn't overwrite optimistic changes. See the merge logic in the big
   `useEffect` near the top of the component.
-- **Auto-refresh:** revalidates every **30s** (skipped while typing / modal open /
-  preview open / **tab backgrounded** `document.hidden`) and on tab focus/visibility.
-  **Each revalidation primes a fresh App Bridge session token first**
-  (`window.shopify.idToken()` in `primeTokenAndRevalidate`) so a background request never
-  goes out on an expired ~60s token — that expired-token request is what produced the bare
-  white **"401 Unauthorized"** page after a station sat idle. A self-healing `ErrorBoundary`
-  (bottom of app._index) auto-reloads **once** on any 401 as a safety net (guarded by a
-  `cutlist-401-reload` sessionStorage flag, cleared on next good load). The **"Last updated"
-  counter resets on every completed revalidation** (honest "seconds since last check", via a
-  revalidator-state effect), NOT just on data change — so a visible-but-quiet screen still
-  ticks 1→30→1, proving it's live-polling. A *visible* screen never stops polling; only a
-  backgrounded tab pauses (and resumes on return).
+- **Auto-refresh:** revalidates every **30s** and on tab focus/visibility, via
+  `primeTokenAndRevalidate` (which best-effort refreshes the App Bridge session token
+  before revalidating, capped by a **2s timeout race** so a hung `window.shopify.idToken()`
+  can't freeze the refresh). The 30s tick skips only when **a barcode field actually has
+  text** (a real in-progress scan) or a modal/preview is open. **Hard-won gotchas (see
+  2026-07-16 log):**
+  - Do NOT gate the interval on `document.hidden` — it reads `true` in the embedded iframe
+    even while on-screen and silently kills the refresh.
+  - Do NOT infer "typing" from `document.activeElement`/`contenteditable` — the scan field
+    is a Polaris `<s-text-field>` that is ALWAYS focused and reports `contenteditable=true`,
+    so that heuristic thinks the cutter is perpetually typing. Use barcode-text state.
+  - Do NOT `await idToken()` unconditionally — it can hang on a stale session and freeze
+    the refresh; always race a timeout.
+  - The **"Last updated" counter resets on every completed revalidation** (revalidator-state
+    effect), not just on data change — so a visible-but-quiet screen still ticks 1→30→1 as
+    proof it's live-polling.
+- **401 handling:** the loader's own errors go to Shopify's built-in `boundary.error`
+  (app._index `ErrorBoundary` just returns it) — the framework's proper App Bridge
+  re-auth. Do NOT catch a 401 and `window.location.reload()`: a raw reload re-requests the
+  iframe with the ORIGINAL, now-stale embedded params (id_token/hmac/timestamp) and itself
+  returns the bare white "401 Unauthorized" page. Some bare 401s are document-level (React
+  not mounted) and can't be caught in-app — a one-time manual reload is the fallback.
+- **Transient Shopify errors:** loader GraphQL calls go through `graphqlWithRetry`
+  (3 attempts, 300/600ms backoff) so a momentary Shopify **503 "Service Unavailable"**
+  self-heals instead of white-screening. Sustained outages still fail (reload later).
 - **The one piece of persistent app data is `CutEvent`** (cut log), written by the
   `logCut` action intent. Everything else is derived from Shopify.
 - **The app never fulfills orders** — it only writes order *tags* (`tagsAdd`/`tagsRemove`
@@ -132,8 +145,9 @@ tracks cut progress. It also logs per-cutter productivity.
     the full order incl. cut/ready-to-ship lines, so a mixed order reduced to one type by
     cutting never qualifies. A **roll end is detected by `isRollEnd()`** (variant/fabric
     length contains "yard piece") — NOT `productType === "roll end"`, which is a
-    **deprecated** field (roll ends now carry productType "fabric by yard"). Same fix was
-    applied to the roll-end **print button**.
+    **deprecated** field (roll ends now carry productType "fabric by yard"). Note:
+    `isRollEnd()` is ONLY for these counts/filters now — the scan→print flow does NOT
+    special-case roll ends (see the print-flow bullet below).
   - *Customers with Multiple Orders* (renamed from "Multiple Orders") — unique **customers**
     (`customerId || "guest"`) tagged `multiple orders`.
   - *Local Pickup* — unique orders tagged `local pickup`, from `cutListItemsVisible`.
@@ -147,6 +161,26 @@ tracks cut progress. It also logs per-cutter productivity.
   - *Orders Cut Log* — unique **partially-picked** orders; *Items Cut Log* — cut **line
     items** in those orders. (A partially-picked order shows in both Total Orders to Pick
     and Orders Cut Log by design.)
+- **One scan→print flow for every product EXCEPT swatches.** After a scan verifies a line
+  (`readyToPrint`), a normal product shows **Print Labels** (bin + product/cut labels, first
+  time) → **Print Product Label** (`openPrint(item, !alreadyPrinted)`). Roll ends use this
+  **identical** flow — they are NOT special-cased in the print buttons (client request
+  2026-07-16; the old bin-label-only roll-end branch was removed). Swatches are the only
+  exception: they render as one **bundle row** (`isBundleRow`, checked *before* the
+  `readyToPrint` branch) with their own **Print Swatch Labels** flow. So: swatch → bundle
+  flow; everything else → the shared normal flow.
+- **Activation alert (order note + inventory warning).** On EVERY line (re)activation
+  (`activeLineId` change, tracked by `prevNoteLineIdRef` so the 30s refresh doesn't re-pop
+  it), a modal opens if the line has an order note AND/OR an inventory warning — both
+  render side by side when both apply; note-only is unchanged behavior. Two independent
+  signals share one modal (`noteModalContent = {orderName, note, inventoryWarning}`):
+  - *Order note* — `item.orderNote`; also reopened by the `📝 NOTE` badge.
+  - *Inventory warning* — `hasInventoryWarning(item)` = `inventoryQuantity != null &&
+    inventoryQuantity <= 0`. `variant.inventoryQuantity` is **available** stock (already
+    net of what orders committed), so `<= 0` IS "this cut brings the fabric to 0/negative"
+    — do NOT subtract the line quantity again (double-count). Replaces a Shopify Flow that
+    added an inventory note (client is removing that Flow; the app is now the source of
+    truth, and it's live via the 30s refresh). Also shown by a `⚠️ CHECK INVENTORY` badge.
 - **Reference links open in a NEW TAB, on purpose.** Product/SKU/order/customer links use
   real `https://admin.shopify.com/store/<handle>/...` URLs (built by `adminUrl()`, from
   `data.shop`) with `target="_blank"` — NOT `shopify://admin/...` App Bridge deep links.
@@ -201,11 +235,70 @@ Note: `app._index.tsx`, `app.history.tsx`, `app.diagnose.tsx` use `// @ts-nochec
   but not `read_all_orders` — older orders never reach the loader (e.g. a >90-day rush
   order shows 0 on the cut list / Rush card). Fix = request the protected `read_all_orders`
   scope (Shopify approval + merchant re-consent), then add it to `shopify.app.toml`.
+- **Cut History shows every cutter as "Unknown"** because the app authenticates with
+  **offline (app-level) tokens** — no logged-in-user identity, so `currentStaffMember`
+  is empty and `employeeName` falls back to "Unknown". The history page ALREADY groups by
+  `cutterName` per day (SQL), so the ONLY missing piece is per-user attribution. Fix =
+  switch to **online (per-user) access tokens** (`session.onlineAccessInfo.associated_user`
+  gives the name — no new scope needed); tradeoff = re-consent + ~24h token expiry churn,
+  and it touches the auth machinery, so do it as its own carefully-tested change.
+  **Deferred by client 2026-07-16.**
 
 ## Session Log
 
 > Newest first. One entry per working session. Keep it short: what changed, why, and
 > any thread the next session should pick up.
+
+### 2026-07-16
+- **Fixed: the 2026-07-09 auth work froze the auto-refresh in production** (client saw the
+  white 401 again + a stale list; "Last updated" counter climbing forever). Root causes —
+  all regressions I introduced on 2026-07-09 — found via console logging after 3 wrong
+  guesses:
+  1. `if (document.hidden) return` in the 30s interval — `document.hidden` reads **true**
+     in the embedded iframe even while on-screen → every tick bailed. **Removed.**
+  2. `isTyping` inferred from `document.activeElement`/`contenteditable` — the scan field
+     is a Polaris `<s-text-field>`, always focused, reporting `contenteditable=true`, so it
+     looked like perpetual typing → every tick bailed with "typing". **Now** keys off actual
+     barcode TEXT (`barcodeInputs`), so an empty focused field doesn't block.
+  3. `await window.shopify.idToken()` unconditionally — can HANG on a stale session and
+     never reach `revalidate()`. **Now** raced against a 2s timeout.
+  Net: the 30s poll works on-screen again (counter ticks 1→30→1), pauses only during a real
+  scan, and can't be frozen. Verified by user (idle resets; typing pauses; 225s+ idle→return
+  clean).
+- **401 white-page — conservative fix.** Removed the custom catch-401-and-
+  `window.location.reload()` ErrorBoundary; it reloaded the iframe with STALE embedded params
+  and could itself produce the bare 401. `ErrorBoundary` now just `boundary.error(...)` —
+  Shopify's built-in App Bridge re-auth. Note: some bare 401s are document-level (React not
+  mounted) and can't be caught in-app; a one-time reload remains the fallback. See the new
+  **401 handling** bullet in Core concepts.
+- **NOTE re-pops on EVERY activation** (client): removed the `acknowledgedNotes` once-per-
+  order gate; keyed to a real `activeLineId` change (not the 30s refresh). Verified.
+- **NEW: inventory warning modal** (client — replacing a Shopify Flow they'll remove).
+  Per-line `⚠️ CHECK INVENTORY` alert on activation (+ badge) when `inventoryQuantity <= 0`
+  (available stock, already net of commitments — do NOT subtract line qty, that double-
+  counts; validated against a real 0/21 order the Flow had flagged). Shares the activation
+  modal with the note (side-by-side sections when both). See the **Activation alert** bullet
+  in Core concepts. Verified.
+- **NEW: `graphqlWithRetry`** wraps loader GraphQL (3 tries, 300/600ms backoff) so a Shopify
+  **503 "Service Unavailable"** blip self-heals instead of white-screening. Client hit a 503
+  twice in the demo store — confirmed it's a transient Shopify-side issue, not our code.
+- Open thread: **per-cutter Cut History attribution** needs online tokens — deferred, see
+  Known quirks.
+- **Roll ends now use the SAME scan→print flow as normal by-the-yard products** (client
+  request). Previously a scanned roll end only offered "Print Bin Label" / "Mark Already
+  Printed" (bin only, no product label); it was missing a way to print the product label.
+  - Fix: removed the `isRollEnd(item)` branch in the `readyToPrint` action cell
+    (~app._index.tsx:3387) so roll ends fall through to the normal
+    **Print Labels → Print Product Label** button (`openPrint(item, !alreadyPrinted)`).
+  - Safe because swatches are handled by the `isBundleRow` branch *above* `readyToPrint`,
+    so they're untouched; and `isRollEnd()` is still used for the Roll Ends Only
+    count/filter. Net rule now: **swatch → bundle flow; every other product → shared normal
+    flow.** See the new print-flow bullet in Core concepts (and the corrected roll-end note
+    — `isRollEnd()` is counts/filters only now, no longer the print button).
+  - Verified by user in the test store; builds clean.
+- Supabase Postgres upgrade (from 2026-07-09 thread) is **done**: project on **17.6.1.141**
+  (above the 121 threshold). Management API lagged on the version field for a while but the
+  dashboard confirmed it. App-side 401 fix also pushed. That thread is closed.
 
 ### 2026-07-09
 - **Fixed: intermittent bare white "401 Unauthorized" page** (client report — cutter

@@ -1,12 +1,7 @@
 // @ts-nocheck
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import {
-  isRouteErrorResponse,
-  useLoaderData,
-  useRevalidator,
-  useRouteError,
-} from "react-router";
+import { useLoaderData, useRevalidator, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
@@ -142,6 +137,10 @@ type CutListItem = {
   allLineItems: LineItem[];
   productImage: string | null;
   productImageAlt: string | null;
+  // Available (sellable) inventory for this line's variant, net of what orders have
+  // already committed. `<= 0` means cutting this brings the fabric to 0 or negative —
+  // the "check inventory" warning. Null when the variant doesn't report inventory.
+  inventoryQuantity: number | null;
 };
 
 function isPickedByTag(orderTags: string[]): boolean {
@@ -216,11 +215,36 @@ function toCutListItems(
         productType: lineItem.product?.productType || null,
         fabricLength,
         colorCode,
+        inventoryQuantity: lineItem.variant?.inventoryQuantity ?? null,
       });
     }
   }
 
   return items;
+}
+
+// Calls admin.graphql with a few retries on TRANSIENT failures (Shopify 503 "Service
+// Unavailable", 500s, throttles, network blips). Without this, one momentary Shopify
+// hiccup white-screens the whole loader with a raw error. Retries are bounded with a
+// short backoff; a genuinely persistent error still throws after the last attempt.
+async function graphqlWithRetry(
+  admin: any,
+  query: string,
+  options: any,
+  maxAttempts = 3,
+) {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await admin.graphql(query, options);
+    } catch (err) {
+      lastErr = err;
+      if (attempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, 300 * attempt)); // 300ms, 600ms
+      }
+    }
+  }
+  throw lastErr;
 }
 
 // Fetches ALL orders matching `query` via cursor pagination. Each page is a small,
@@ -234,7 +258,8 @@ async function queryOrders(admin: any, query: string) {
   let after: string | null = null;
 
   for (let page = 0; page < MAX_PAGES; page++) {
-    const response = await admin.graphql(
+    const response = await graphqlWithRetry(
+      admin,
       `#graphql
     query GetOrders($first: Int!, $query: String!, $after: String) {
       orders(first: $first, query: $query, after: $after) {
@@ -898,11 +923,15 @@ export default function CutListPage() {
   }, [cutListItems, pickedItems]);
 
   const [completionMessage, setCompletionMessage] = useState<string | null>(null);
+  // Activation alert modal. Carries the order note and/or the inventory warning — either
+  // or both sections render depending on what applies to the activated line. Inventory
+  // detection is fully independent of the note (see hasInventoryWarning); this is only the
+  // shared presentation layer.
   const [noteModalContent, setNoteModalContent] = useState<{
     orderName: string;
-    note: string;
+    note: string | null;
+    inventoryWarning: boolean;
   } | null>(null);
-  const [acknowledgedNotes, setAcknowledgedNotes] = useState<Set<string>>(new Set());
   const [readyToShipModalOrderId, setReadyToShipModalOrderId] = useState<
     string | null
   >(null);
@@ -1161,23 +1190,31 @@ export default function CutListPage() {
     });
   }, [activeLineId, cutListItems]);
 
-  // Auto-open the order note when a line is activated, so the cutter sees any
-  // special instructions BEFORE cutting. Shown once per order (marked acknowledged),
-  // so it won't re-pop; the NOTE badge still reopens it on demand.
+  // Auto-open the activation alert EVERY time a line is (re)activated, so the cutter
+  // always sees the order note AND/OR the inventory warning before cutting — even if they
+  // dismissed it earlier, cut other items, and came back to this line. We key off a REAL
+  // change in activeLineId (tracked via a ref), not the 30s data refresh — this effect
+  // also re-runs when cutListItems / pickedTodayItems change, and we must NOT let it
+  // re-pop on its own while a line just stays active. Note and inventory are independent
+  // signals; the modal shows whichever (or both) apply.
+  const prevNoteLineIdRef = useRef<string | null>(null);
   useEffect(() => {
+    if (activeLineId === prevNoteLineIdRef.current) return;
+    prevNoteLineIdRef.current = activeLineId;
     if (!activeLineId) return;
     const activeItem =
       cutListItems.find((i) => i.lineItemId === activeLineId) ??
       pickedTodayItems.find((i) => i.lineItemId === activeLineId);
     if (!activeItem) return;
-    if (!activeItem.orderNote) return;
-    if (acknowledgedNotes.has(activeItem.orderId)) return;
+    const note = activeItem.orderNote;
+    const inventoryWarning = hasInventoryWarning(activeItem);
+    if (!note && !inventoryWarning) return;
     setNoteModalContent({
       orderName: activeItem.orderName,
-      note: activeItem.orderNote,
+      note: note ?? null,
+      inventoryWarning,
     });
-    setAcknowledgedNotes((prev) => new Set(prev).add(activeItem.orderId));
-  }, [activeLineId, cutListItems, pickedTodayItems, acknowledgedNotes]);
+  }, [activeLineId, cutListItems, pickedTodayItems]);
 
   useEffect(() => {
     if (getFilteredItems().length > 0 && !activeLineId) {
@@ -1201,6 +1238,8 @@ export default function CutListPage() {
   showProductCountModalRef.current = showProductCountModal;
   const previewImageRef = useRef(previewImage);
   previewImageRef.current = previewImage;
+  const barcodeInputsRef = useRef(barcodeInputs);
+  barcodeInputsRef.current = barcodeInputs;
 
   // Force App Bridge to mint a FRESH embedded session token before each background
   // revalidation, then revalidate. Shopify session tokens expire ~60s; the old code
@@ -1211,32 +1250,35 @@ export default function CutListPage() {
   const primeTokenAndRevalidate = useCallback(async () => {
     if (revalidatorRef.current.state !== "idle") return;
     try {
-      await window.shopify?.idToken?.();
+      // Prime a fresh token, but NEVER let it block the refresh. App Bridge's idToken()
+      // can HANG (never resolve) once a session has gone stale after a long idle — and if
+      // we await it unconditionally, revalidate() below never runs and the list silently
+      // stops updating (counter climbs past 30s forever). Race it against a 2s timeout so
+      // revalidate() always fires; App Bridge still injects whatever token it has on the
+      // request. If it hangs because the session is truly dead, that surfaces as a normal
+      // 401 the auth-recovery path handles — far better than a frozen, stale list.
+      await Promise.race([
+        Promise.resolve(window.shopify?.idToken?.()),
+        new Promise((resolve) => setTimeout(resolve, 2000)),
+      ]);
     } catch {
-      // ignore — revalidate anyway; the ErrorBoundary auto-recovers a true 401
+      // ignore — revalidate anyway
     }
     revalidatorRef.current.revalidate();
   }, []);
 
   useEffect(() => {
     const refreshInterval = setInterval(() => {
-      // Don't refresh a backgrounded tab — nobody's watching, and the token has
-      // likely lapsed, so the request would just 401. It resumes on return below.
-      if (document.hidden) return;
-
-      const activeEl = document.activeElement as
-        | HTMLInputElement
-        | HTMLTextAreaElement
-        | HTMLElement
-        | null;
-      const isInputElement =
-        activeEl?.tagName === "INPUT" || activeEl?.tagName === "TEXTAREA";
-      const hasText =
-        isInputElement &&
-        ((activeEl as HTMLInputElement).value?.length ?? 0) > 0;
-      const isContentEditable =
-        activeEl?.getAttribute("contenteditable") === "true";
-      const isTyping = hasText || isContentEditable;
+      // Do NOT gate this on `document.hidden` (reads `true` in the embedded iframe even
+      // while on-screen) or on `document.activeElement`/contenteditable: the scan field
+      // is a Polaris `<s-text-field>` that is ALWAYS focused and reports
+      // `contenteditable="true"`, so the old activeElement heuristic thought the cutter
+      // was perpetually typing and blocked every refresh (counter climbed forever; only a
+      // focus/click event reset it). Detect a real in-progress scan by actual barcode
+      // TEXT instead — skip only when some scan field genuinely has characters in it.
+      const isTyping = Object.values(barcodeInputsRef.current).some(
+        (v) => typeof v === "string" && v.length > 0,
+      );
 
       if (isTyping) return;
       if (revalidatorRef.current.state !== "idle") return;
@@ -1263,14 +1305,6 @@ export default function CutListPage() {
       window.removeEventListener("focus", onVisible);
     };
   }, [primeTokenAndRevalidate]);
-
-  // On a successful load, clear the 401-recovery guard so a future expired-session
-  // 401 gets its own one-shot auto-reload (see ErrorBoundary at the bottom of the file).
-  useEffect(() => {
-    try {
-      window.sessionStorage.removeItem("cutlist-401-reload");
-    } catch {}
-  }, []);
 
   // Reset the "Last updated" counter whenever a background revalidation COMPLETES — not
   // only when the data happened to change. This makes it an honest "seconds since we last
@@ -1542,6 +1576,15 @@ export default function CutListPage() {
     if (item.variantTitle?.toLowerCase().includes("yard piece")) return true;
     if (item.fabricLength?.toLowerCase().includes("yard piece")) return true;
     return false;
+  }
+
+  // "Check inventory" warning: cutting this line brings the fabric to 0 or negative.
+  // `inventoryQuantity` is AVAILABLE stock (already net of what orders committed), so a
+  // value of 0 or below is exactly that condition — no need to subtract the line quantity
+  // again (that would double-count the order). Null = variant doesn't report inventory →
+  // no warning. Fully independent of the order-note logic.
+  function hasInventoryWarning(item: CutListItem): boolean {
+    return item.inventoryQuantity != null && item.inventoryQuantity <= 0;
   }
 
   // Unique order IDs whose ORIGINAL composition — every real line as submitted,
@@ -3163,10 +3206,24 @@ const cellStyle = {
         setNoteModalContent({
           orderName: item.orderName,
           note: item.orderNote!,
+          inventoryWarning: false,
         })
       }
     >
       <s-badge tone="caution">📝 NOTE</s-badge>
+    </s-clickable>
+  )}
+  {hasInventoryWarning(item) && (
+    <s-clickable
+      onClick={() =>
+        setNoteModalContent({
+          orderName: item.orderName,
+          note: null,
+          inventoryWarning: true,
+        })
+      }
+    >
+      <s-badge tone="critical">⚠️ CHECK INVENTORY</s-badge>
     </s-clickable>
   )}
   <s-link href={adminUrl("orders", orderIdNum)} target="_blank">
@@ -3384,34 +3441,17 @@ const cellStyle = {
                       ) : readyToPrint.has(item.lineItemId) ? (
                         <s-stack gap="small">
                           <s-badge tone="success">✓ Scan verified</s-badge>
-                          {isRollEnd(item) ? (
-                            alreadyPrinted ? (
-                              <s-button
-                                variant="primary"
-                                onClick={() =>
-                                  openPrint(item, false, { skipWindow: true })
-                                }
-                              >
-                                Mark Already Printed
-                              </s-button>
-                            ) : (
-                              <s-button
-                                variant="primary"
-                                onClick={() =>
-                                  openPrint(item, true, { skipCut: true })
-                                }
-                              >
-                                Print Bin Label
-                              </s-button>
-                            )
-                          ) : (
-                            <s-button
-                              variant="primary"
-                              onClick={() => openPrint(item, !alreadyPrinted)}
-                            >
-                              {alreadyPrinted ? "Print Product Label" : "Print Labels"}
-                            </s-button>
-                          )}
+                          {/* Roll ends follow the SAME flow as normal by-the-yard products
+                              (client request): scan → Print Labels (bin + product the first
+                              time), then Print Product Label. Every non-swatch product shares
+                              this path; swatches are the only exception and are handled by the
+                              isBundleRow branch above. */}
+                          <s-button
+                            variant="primary"
+                            onClick={() => openPrint(item, !alreadyPrinted)}
+                          >
+                            {alreadyPrinted ? "Print Product Label" : "Print Labels"}
+                          </s-button>
                         </s-stack>
                       ) : isActive ? (
                         <s-stack gap="small">
@@ -3599,12 +3639,50 @@ const cellStyle = {
 
       <s-modal
         id="order-note-modal"
-        heading={`Note on Order ${noteModalContent?.orderName ?? ""}`}
+        heading={
+          noteModalContent?.inventoryWarning
+            ? noteModalContent?.note
+              ? `Order ${noteModalContent?.orderName ?? ""} — Check Inventory & Note`
+              : `Order ${noteModalContent?.orderName ?? ""} — Check Inventory`
+            : `Note on Order ${noteModalContent?.orderName ?? ""}`
+        }
         ref={noteModalRef}
         onHide={() => setNoteModalContent(null)}
       >
         <s-box padding="base">
-          <s-text>{noteModalContent?.note}</s-text>
+          <s-stack direction="inline" gap="large">
+            {noteModalContent?.inventoryWarning && (
+              <s-box
+                padding="base"
+                background="subdued"
+                borderWidth="base"
+                borderColor="base"
+                borderRadius="base"
+              >
+                <s-stack gap="small">
+                  <s-badge tone="critical">⚠️ CHECK INVENTORY</s-badge>
+                  <s-text>
+                    This cut will bring this fabric to 0 or negative. Check
+                    inventory before cutting.
+                  </s-text>
+                </s-stack>
+              </s-box>
+            )}
+            {noteModalContent?.note && (
+              <s-box
+                padding="base"
+                background="subdued"
+                borderWidth="base"
+                borderColor="base"
+                borderRadius="base"
+              >
+                <s-stack gap="small">
+                  <s-badge tone="caution">📝 ORDER NOTE</s-badge>
+                  <s-text>{noteModalContent.note}</s-text>
+                </s-stack>
+              </s-box>
+            )}
+          </s-stack>
         </s-box>
         <s-button
           slot="primary-action"
@@ -3701,40 +3779,13 @@ const cellStyle = {
   );
 }
 
-// Self-heals the embedded-session 401 (the bare white "401 Unauthorized" page a cutter
-// would otherwise be stuck on until a manual reload). An expired session token — or a
-// transient DB blip that fails the session read — makes the loader's authenticate.admin
-// reject the request as 401. Here we reload ONCE to re-run Shopify's token exchange,
-// guarded by a sessionStorage flag so a persistent 401 can't loop (the guard is cleared
-// on the next successful load). Any non-401 error falls through to Shopify's own boundary.
+// Delegate ALL errors — including the embedded-session 401 — to Shopify's built-in
+// boundary handler, which performs the proper App Bridge re-authentication for an
+// embedded app (fresh session token via Shopify). A previous version here caught the 401
+// and did `window.location.reload()`; but a raw reload re-requests the iframe with the
+// ORIGINAL, now-stale embedded params (id_token/hmac/timestamp), which itself returns the
+// bare "401 Unauthorized" page — i.e. the reload could strand the cutter on the very
+// screen it was meant to fix. Letting the framework reauthenticate is the correct path.
 export function ErrorBoundary() {
-  const error = useRouteError();
-  const is401 = isRouteErrorResponse(error) && error.status === 401;
-
-  useEffect(() => {
-    if (!is401) return;
-    const KEY = "cutlist-401-reload";
-    let alreadyTried = false;
-    try {
-      alreadyTried = window.sessionStorage.getItem(KEY) === "1";
-      if (alreadyTried) {
-        window.sessionStorage.removeItem(KEY);
-      } else {
-        window.sessionStorage.setItem(KEY, "1");
-      }
-    } catch {}
-    if (!alreadyTried) window.location.reload();
-  }, [is401]);
-
-  if (is401) {
-    return (
-      <s-page heading="Reconnecting…">
-        <s-section>
-          <s-text>Session expired — reloading the cut list…</s-text>
-        </s-section>
-      </s-page>
-    );
-  }
-
-  return boundary.error(error);
+  return boundary.error(useRouteError());
 }
