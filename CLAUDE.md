@@ -193,18 +193,19 @@ tracks cut progress. It also logs per-cutter productivity.
   exception: they render as one **bundle row** (`isBundleRow`, checked *before* the
   `readyToPrint` branch) with their own **Print Swatch Labels** flow. So: swatch → bundle
   flow; everything else → the shared normal flow.
-- **Activation alert (order note + inventory warning).** On EVERY line (re)activation
-  (`activeLineId` change, tracked by `prevNoteLineIdRef` so the 30s refresh doesn't re-pop
-  it), a modal opens if the line has an order note AND/OR an inventory warning — both
-  render side by side when both apply; note-only is unchanged behavior. Two independent
-  signals share one modal (`noteModalContent = {orderName, note, inventoryWarning}`):
-  - *Order note* — `item.orderNote`; also reopened by the `📝 NOTE` badge.
-  - *Inventory warning* — `hasInventoryWarning(item)` = `inventoryQuantity != null &&
-    inventoryQuantity <= 0`. `variant.inventoryQuantity` is **available** stock (already
-    net of what orders committed), so `<= 0` IS "this cut brings the fabric to 0/negative"
-    — do NOT subtract the line quantity again (double-count). Replaces a Shopify Flow that
-    added an inventory note (client is removing that Flow; the app is now the source of
-    truth, and it's live via the 30s refresh). Also shown by a `⚠️ CHECK INVENTORY` badge.
+- **Activation note pop-up + inventory badge** (as of 2026-07-21 the inventory warning is
+  BADGE-ONLY — no modal). On EVERY line (re)activation (`activeLineId` change, tracked by
+  `prevNoteLineIdRef` so the 30s refresh doesn't re-pop it), the note modal opens **only if
+  the line has an order note** (`noteModalContent`; `📝 NOTE` badge also reopens it).
+  - *Inventory warning* — shown ONLY as a passive `⚠️ CHECK INVENTORY` badge on the row
+    (no modal, no auto-pop — client decided the badge is sufficient). Driven by
+    `hasInventoryWarning(item)` = `inventoryQuantity != null && inventoryQuantity <= 0`,
+    **excluding swatches and roll ends** (one-off/sample stock naturally near 0).
+    `variant.inventoryQuantity` is **available** stock (already net of commitments), so
+    `<= 0` IS "this cut brings the fabric to 0/negative" — do NOT subtract the line
+    quantity again (double-count). Replaces a Shopify Flow the client is removing; the app
+    is now the source of truth, live via the 30s refresh. NOTE: `noteModalContent` still
+    carries an inert `inventoryWarning` field + a dead modal section — never set true now.
 - **Reference links open in a NEW TAB, on purpose.** Product/SKU/order/customer links use
   real `https://admin.shopify.com/store/<handle>/...` URLs (built by `adminUrl()`, from
   `data.shop`) with `target="_blank"` — NOT `shopify://admin/...` App Bridge deep links.
@@ -306,6 +307,14 @@ Note: `app._index.tsx`, `app.history.tsx`, `app.diagnose.tsx` use `// @ts-nochec
 - **Fixed: Rush Orders card counted line items, not orders** (`rushOrders.length` → unique
   orderIds). Latent bug (committed), surfaced by the first 2-line rush order; my changes
   didn't cause it. `rushOrders` memo stays line-item-level for the rush filter/sort.
+- **Inventory warning → badge-only** (client): removed the modal pop-up. Activation auto-pop
+  is note-only again; the `⚠️ CHECK INVENTORY` badge is now a passive indicator (no click
+  modal). Left the modal's inventory section as inert dead code (didn't touch the note modal
+  — locked). Then **excluded swatches + roll ends** from the badge (in `hasInventoryWarning`).
+  Verified.
+- Commit `dea9c55` (local): position-lock + within-group advance + completion sequencing +
+  rush fixes + regression guard. The inventory-badge tweaks above are on top, being
+  committed/pushed by the user next.
 - Open thread: still verifying the position-lock across edge cases (rush interplay,
   reload, mid-list groups) in the demo store.
 

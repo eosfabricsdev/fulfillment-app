@@ -1180,13 +1180,14 @@ export default function CutListPage() {
       cutListItems.find((i) => i.lineItemId === activeLineId) ??
       pickedTodayItems.find((i) => i.lineItemId === activeLineId);
     if (!activeItem) return;
+    // Auto-pop ONLY for the order note. The inventory warning no longer opens a modal —
+    // the ⚠️ CHECK INVENTORY badge on the row is sufficient (client 2026-07-21).
     const note = activeItem.orderNote;
-    const inventoryWarning = hasInventoryWarning(activeItem);
-    if (!note && !inventoryWarning) return;
+    if (!note) return;
     setNoteModalContent({
       orderName: activeItem.orderName,
-      note: note ?? null,
-      inventoryWarning,
+      note,
+      inventoryWarning: false,
     });
   }, [activeLineId, cutListItems, pickedTodayItems]);
 
@@ -1556,7 +1557,11 @@ export default function CutListPage() {
   // value of 0 or below is exactly that condition — no need to subtract the line quantity
   // again (that would double-count the order). Null = variant doesn't report inventory →
   // no warning. Fully independent of the order-note logic.
+  // Excludes swatches ("Swatch Bundle") and roll ends ("X.XX Yard Piece"): both are
+  // one-off/sample stock that naturally sits at/near 0, so the warning is noise there
+  // (client 2026-07-21).
   function hasInventoryWarning(item: CutListItem): boolean {
+    if (isSwatch(item) || isRollEnd(item)) return false;
     return item.inventoryQuantity != null && item.inventoryQuantity <= 0;
   }
 
@@ -3339,17 +3344,8 @@ const cellStyle = {
     </s-clickable>
   )}
   {hasInventoryWarning(item) && (
-    <s-clickable
-      onClick={() =>
-        setNoteModalContent({
-          orderName: item.orderName,
-          note: null,
-          inventoryWarning: true,
-        })
-      }
-    >
-      <s-badge tone="critical">⚠️ CHECK INVENTORY</s-badge>
-    </s-clickable>
+    // Passive indicator — no modal. The badge alone is the inventory alert.
+    <s-badge tone="critical">⚠️ CHECK INVENTORY</s-badge>
   )}
   <s-link href={adminUrl("orders", orderIdNum)} target="_blank">
     {item.orderName}
