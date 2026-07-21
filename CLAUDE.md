@@ -1,6 +1,26 @@
 # CLAUDE.md — EOS Fabrics Fulfillment Cut List
 
-> **⚠️ SESSION-END PROTOCOL (read first):** Before ending any session that changed
+> **⚠️ REGRESSION GUARD — LOCKED FUNCTIONS (read first, applies to EVERY change):**
+> This app runs a live warehouse; the client has repeatedly been burned by an update
+> silently removing or altering a feature that was NOT meant to change. Before making
+> ANY edit, actively check whether it could touch behavior beyond its stated intent —
+> especially the **locked functions** below — and if it *might* clash with, remove, or
+> change one **unintentionally, STOP and flag it to the user to decide together.** Do
+> not "clean up" or refactor adjacent behavior in passing. When in doubt, call it out.
+>
+> **Locked functions** (change ONLY when explicitly asked, and say what you're touching):
+> the cut→tag→print flow and its tag conventions; the per-order `enqueueWrite` queue;
+> the 30s/focus auto-refresh (and its no-`document.hidden`/barcode-text-typing rules);
+> 401 handling via `boundary.error` (no raw reload); swatch bundling; roll-end = normal
+> print flow; filter-card count definitions; the activation alert (note re-pop + inventory
+> warning); new-tab reference links; `graphqlWithRetry`; **RUSH-TO-TOP sorting** (rush
+> orders + items sharing a rush order's SKU float ABOVE the chronological queue — must
+> never be displaced, including by the SKU position-lock); the **SKU position-lock** +
+> within-group auto-advance. See the body sections for each. NOTE (2026-07-21): the
+> position-lock's whole-list-freeze once broke rush-to-top — anything layered over the
+> sort MUST re-float rush to the top.
+>
+> **⚠️ SESSION-END PROTOCOL:** Before ending any session that changed
 > code, decisions, or understanding, append a dated entry to the
 > [Session Log](#session-log) at the bottom of this file: what we did, why, and any
 > context the next session needs. This file is auto-loaded into context every
@@ -132,6 +152,10 @@ tracks cut progress. It also logs per-cutter productivity.
   in sort order even as new orders arrive.
 - **Filter-card count conventions (audited 2026-06-29 against client intent).** Each
   summary card has a deliberate unit — don't "simplify" them to all match:
+  - *Rush Orders* — unique **orders** carrying the rush label (`new Set(rushOrders.map(
+    orderId)).size`), NOT line items (fixed 2026-07-21 — was `rushOrders.length`, which only
+    looked right while rush orders had one line each). The `rushOrders` memo stays
+    line-item-level for the rush filter list + rush-to-top sort.
   - *Total Orders to Pick* — unique orders with ≥1 **uncut** line (`uniqueOrders` from
     `uncutItems`, not all items).
   - *Total Cuts to Pick* — **line items**, not unit quantity; BUT an order's swatches
@@ -248,6 +272,42 @@ Note: `app._index.tsx`, `app.history.tsx`, `app.diagnose.tsx` use `// @ts-nochec
 
 > Newest first. One entry per working session. Keep it short: what changed, why, and
 > any thread the next session should pick up.
+
+### 2026-07-21
+- **Added the top-of-file REGRESSION GUARD protocol** (client request): before any edit,
+  flag if it might unintentionally change/remove a locked function; don't touch adjacent
+  behavior silently. Also saved as a `feedback` memory. Client has been burned by updates
+  quietly dropping features — treat this as standing policy.
+- **Fixed: final-cut auto-advance vs "Order Complete" ordering.** On the last cut of an
+  order, the app both showed "Order Complete" AND immediately auto-advanced to the next
+  line — whose note popped BEFORE/under the completion message (confusing). Now on a final
+  cut (`pickedCount === totalCount`) the advance is **deferred**: stored in `pendingAdvance`
+  and applied in `acknowledgeCompletion()` when the cutter dismisses the modal (wired to
+  the completion modal's onHide + OK). Non-final cuts advance immediately as before; the
+  same-SKU pre-print (`markReadyToPrint`) is preserved. Applied to BOTH `openPrint` and
+  `printSwatchBundle`. Builds clean; pending user test in demo store.
+- **NEW: SKU position-lock + within-group auto-advance** (client — the batch-jumping fix).
+  Landed in two steps.
+  - *Step 1 — within-group auto-advance (option B):* after a cut, keep cutting the SAME
+    fabric — next uncut item of that SKU after the current one, wrapping to the top of the
+    group — until the whole group is cut, then the next line. In `openPrint`. Verified.
+  - *Step 2 — position-lock (replaces the old time-anchor `skuAnchorTimes`):* the ACTIVE
+    SKU group is pinned in place; `listLock = {sku, order[]}` (localStorage). `effectiveCreatedAt`
+    now returns own time; `naturalAllItems` memo + a capture effect (re-snapshots when the
+    active SKU changes) + `applyListLock`. Lock follows activation; new same-SKU orders
+    append to the group tail; persists across reload.
+- **REGRESSION I caused + fixed same session (rush-to-top).** Step 2's first cut froze the
+  WHOLE list, so a new rush order landed at the BOTTOM instead of the top — breaking the
+  locked rush-to-top behavior. Root failure: I flagged the deviation as a post-build
+  "caveat" instead of STOPPING before, per the guard. Fix: after `applyListLock`, re-float
+  rush (rush orders + items sharing a rush order's SKU) to the top. Rush-to-top added to
+  the top-of-file locked-functions list. **Rule: anything layered over the sort MUST
+  re-float rush to the top.**
+- **Fixed: Rush Orders card counted line items, not orders** (`rushOrders.length` → unique
+  orderIds). Latent bug (committed), surfaced by the first 2-line rush order; my changes
+  didn't cause it. `rushOrders` memo stays line-item-level for the rush filter/sort.
+- Open thread: still verifying the position-lock across edge cases (rush interplay,
+  reload, mid-list groups) in the demo store.
 
 ### 2026-07-16
 - **Fixed: the 2026-07-09 auth work froze the auto-refresh in production** (client saw the

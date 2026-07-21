@@ -923,6 +923,13 @@ export default function CutListPage() {
   }, [cutListItems, pickedItems]);
 
   const [completionMessage, setCompletionMessage] = useState<string | null>(null);
+  // On a FINAL cut we show the "Order Complete" modal and DEFER the auto-advance to the
+  // next line until the cutter acknowledges it — otherwise the next line's note pops
+  // before/under the completion message (confusing). Holds the line to move to.
+  const [pendingAdvance, setPendingAdvance] = useState<{
+    lineItemId: string;
+    markReadyToPrint: boolean;
+  } | null>(null);
   // Activation alert modal. Carries the order note and/or the inventory warning — either
   // or both sections render depending on what applies to the activated line. Inventory
   // detection is fully independent of the note (see hasInventoryWarning); this is only the
@@ -990,33 +997,43 @@ export default function CutListPage() {
     }
   }, [moveToCutListConfirm]);
 
-  const [skuAnchorTimes, setSkuAnchorTimes] = useState<Record<string, number>>(
-    () => {
-      if (typeof window === "undefined") return {};
-      try {
-        const stored = window.localStorage.getItem("skuAnchorTimes");
-        if (!stored) return {};
-        const parsed = JSON.parse(stored);
-        return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-          ? parsed
-          : {};
-      } catch {
-        return {};
+  // Position-lock (replaces the old time-anchor `skuAnchorTimes`). The currently ACTIVE
+  // SKU group is pinned in place on the main cut list. `sku` = the locked fabric; `order`
+  // = the frozen list of lineItemIds captured when that group became active. As items are
+  // cut they drop out (list closes up, no reshuffle); new same-SKU orders append to the
+  // group's tail; everything else appends after. When the active line's SKU changes, we
+  // re-capture (the old group releases and resorts). Persisted so a mid-batch reload keeps
+  // the frozen position. See applyListLock + the capture effect below cutListItemsVisible.
+  const [listLock, setListLock] = useState<{
+    sku: string;
+    order: string[];
+  } | null>(() => {
+    if (typeof window === "undefined") return null;
+    try {
+      const stored = window.localStorage.getItem("listLock");
+      if (!stored) return null;
+      const parsed = JSON.parse(stored);
+      if (
+        parsed &&
+        typeof parsed.sku === "string" &&
+        Array.isArray(parsed.order)
+      ) {
+        return parsed;
       }
-    },
-  );
+      return null;
+    } catch {
+      return null;
+    }
+  });
 
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
-      window.localStorage.setItem(
-        "skuAnchorTimes",
-        JSON.stringify(skuAnchorTimes),
-      );
+      window.localStorage.setItem("listLock", JSON.stringify(listLock));
     } catch {
       // ignore
     }
-  }, [skuAnchorTimes]);
+  }, [listLock]);
 
   useEffect(() => {
     const currentRush = cutListItems.filter(
@@ -1111,49 +1128,6 @@ export default function CutListPage() {
     };
   }, [newRushAlerts]);
 
-  useEffect(() => {
-    if (!activeLineId) return;
-    const activeItem = cutListItems.find(
-      (i) => i.lineItemId === activeLineId,
-    );
-    if (!activeItem) return;
-    if (!activeItem.sku) return;
-    if (activeItem.sku === VIRTUAL_SKU) return;
-    if (isSwatch(activeItem)) return;
-
-    setSkuAnchorTimes((prev) => {
-      if (prev[activeItem.sku] != null) return prev;
-      const sameSkuItems = cutListItems.filter(
-        (i) => i.sku === activeItem.sku,
-      );
-      if (sameSkuItems.length === 0) return prev;
-      const earliest = Math.min(
-        ...sameSkuItems.map((i) => new Date(i.orderCreatedAt).getTime()),
-      );
-      return { ...prev, [activeItem.sku]: earliest };
-    });
-  }, [activeLineId, cutListItems]);
-
-  useEffect(() => {
-    setSkuAnchorTimes((prev) => {
-      const next: Record<string, number> = {};
-      let changed = false;
-      for (const sku of Object.keys(prev)) {
-        const hasItems = cutListItems.some(
-          (item) =>
-            item.sku === sku &&
-            !hasReadyToShipTag(item) &&
-            !pickedItems.has(item.lineItemId),
-        );
-        if (hasItems) {
-          next[sku] = prev[sku];
-        } else {
-          changed = true;
-        }
-      }
-      return changed ? next : prev;
-    });
-  }, [cutListItems, pickedItems]);
 
   useEffect(() => {
     if (!activeLineId) return;
@@ -1352,10 +1326,9 @@ export default function CutListPage() {
     enqueueWrite(form);
   }
 
+  // Natural chronological key. Position stability is now handled by the position-lock
+  // (applyListLock), not by rewriting this time — so it just returns the order's own time.
   const effectiveCreatedAt = (item: CutListItem): number => {
-    if (item.sku && skuAnchorTimes[item.sku] != null) {
-      return skuAnchorTimes[item.sku];
-    }
     return new Date(item.orderCreatedAt).getTime();
   };
 
@@ -1853,6 +1826,74 @@ export default function CutListPage() {
       !hasReadyToShipTag(item) && !pickedItems.has(item.lineItemId),
   );
 
+  // The main list's NATURAL (unlocked) order — sorted the normal way. The position-lock is
+  // layered on top of this, and the capture effect snapshots THIS when the active group
+  // changes.
+  const naturalAllItems = useMemo(() => {
+    const working = cutListItems.filter(
+      (item) =>
+        !hasReadyToShipTag(item) &&
+        !pickedItems.has(item.lineItemId) &&
+        !skippedItems.has(item.lineItemId),
+    );
+    return applyRushFirstSort(working);
+  }, [cutListItems, pickedItems, skippedItems]);
+
+  // Capture / move the position-lock as the active fabric changes: when the active line's
+  // SKU differs from the locked one, snapshot the current natural order and pin that group.
+  // Same SKU still active → keep the frozen order (don't re-capture on data changes), so
+  // the group holds its slot while you cut it. Swatches/virtual don't lock.
+  useEffect(() => {
+    if (!activeLineId) return;
+    const activeItem =
+      cutListItems.find((i) => i.lineItemId === activeLineId) ??
+      pickedTodayItems.find((i) => i.lineItemId === activeLineId);
+    if (!activeItem || !activeItem.sku || activeItem.sku === VIRTUAL_SKU) return;
+    if (isSwatch(activeItem)) return;
+    setListLock((prev) => {
+      if (prev?.sku === activeItem.sku) return prev;
+      return {
+        sku: activeItem.sku,
+        order: naturalAllItems.map((i) => i.lineItemId),
+      };
+    });
+  }, [activeLineId, naturalAllItems, cutListItems, pickedTodayItems]);
+
+  // Layer the position-lock onto a naturally-sorted list: render the locked group's frozen
+  // order in place (items no longer present drop out — the list closes up, no reshuffle),
+  // then place items NOT in the frozen order — a new SAME-SKU cut appends to the locked
+  // group's tail (cut it while the fabric's out); everything else appends after.
+  const applyListLock = (items: CutListItem[]): CutListItem[] => {
+    if (!listLock) return items;
+    const byId = new Map(items.map((i) => [i.lineItemId, i]));
+    const used = new Set<string>();
+    const result: CutListItem[] = [];
+    for (const id of listLock.order) {
+      const it = byId.get(id);
+      if (it) {
+        result.push(it);
+        used.add(id);
+      }
+    }
+    for (const ni of items) {
+      if (used.has(ni.lineItemId)) continue;
+      if (ni.sku === listLock.sku && !isSwatch(ni)) {
+        let insertAt = -1;
+        for (let k = result.length - 1; k >= 0; k--) {
+          if (result[k].sku === listLock.sku) {
+            insertAt = k + 1;
+            break;
+          }
+        }
+        if (insertAt >= 0) result.splice(insertAt, 0, ni);
+        else result.push(ni);
+      } else {
+        result.push(ni);
+      }
+    }
+    return result;
+  };
+
   const getFilteredItems = (): CutListItem[] => {
     if (currentFilter === "pickedToday") {
       const items = pickedTodayItems.filter((item) => {
@@ -1965,7 +2006,10 @@ export default function CutListPage() {
     };
 
     const sortedHeld = applySkippedSort(heldItems);
-    const allItems = applyRushFirstSort(workingItems);
+    // Use the memoized natural order so the rendered order matches exactly what the
+    // position-lock capture effect snapshotted (they must agree). Equivalent to
+    // applyRushFirstSort(workingItems).
+    const allItems = naturalAllItems;
 
     if (currentFilter === "rollEnds") {
       const rollEndOrders = getFullOrderOnlyIds(isRollEnd);
@@ -1981,7 +2025,25 @@ export default function CutListPage() {
       return allItems.filter((item) => isSwatch(item));
     }
 
-    return [...sortedHeld, ...allItems];
+    // Pin the active fabric's group in place (position-lock) — but RUSH ALWAYS STAYS AT THE
+    // TOP regardless of the lock. Rush-to-top is a LOCKED behavior (customers paid for it)
+    // and must never be displaced by the lock. So: apply the lock, then float rush (rush
+    // orders + items sharing a rush order's SKU) back to the top, preserving each part's
+    // pinned order. New rush arriving mid-lock therefore appears at the top, not the bottom.
+    const pinned = applyListLock(allItems);
+    const rushOrderIds = new Set(
+      pinned.filter((i) => isRushOrder(i.orderTags)).map((i) => i.orderId),
+    );
+    const rushSkus = new Set(
+      pinned
+        .filter((i) => rushOrderIds.has(i.orderId) && i.sku)
+        .map((i) => i.sku),
+    );
+    const isRushItem = (i: CutListItem) =>
+      rushOrderIds.has(i.orderId) || (!!i.sku && rushSkus.has(i.sku));
+    const rushPart = pinned.filter(isRushItem);
+    const restPart = pinned.filter((i) => !isRushItem(i));
+    return [...sortedHeld, ...rushPart, ...restPart];
   };
 
   const getSummaryStats = () => {
@@ -2078,7 +2140,9 @@ export default function CutListPage() {
     const holdOrders = new Set(holdItems.map((item) => item.orderId));
 
     return {
-      rushOrders: rushOrders.length,
+      // Unique ORDERS with the rush label (not line items — a rush order with 2 lines is
+      // still 1). `rushOrders` itself stays line-item-level for the rush filter list.
+      rushOrders: new Set(rushOrders.map((i) => i.orderId)).size,
       ordersCutLog: uniqueCutLogOrders.size,
       itemsCutLog: cutLogItems.length,
       totalOrders: uniqueOrders.size,
@@ -2301,16 +2365,51 @@ export default function CutListPage() {
     const currentIndex = itemsNow.findIndex(
       (i) => i.lineItemId === item.lineItemId,
     );
-    const nextItem = itemsNow[currentIndex + 1];
+    // Within-group auto-advance (option B): after a cut, KEEP CUTTING THE SAME FABRIC —
+    // move to the next uncut item of this SKU *after* the current one, wrapping back to the
+    // top of the group, until the whole group is cut; only THEN fall through to the next
+    // line in the list. This stops the cursor from jumping to a different SKU group and
+    // leaving a fabric half-cut. `pickedItems` is stale for the just-cut line, so exclude
+    // it explicitly. Swatches (bundled) don't participate.
+    let nextItem: CutListItem | undefined;
+    if (item.sku && item.sku !== VIRTUAL_SKU && !isSwatch(item)) {
+      const groupItems = itemsNow.filter(
+        (g) => g.sku === item.sku && !isSwatch(g),
+      );
+      const curInGroup = groupItems.findIndex(
+        (g) => g.lineItemId === item.lineItemId,
+      );
+      if (curInGroup >= 0) {
+        for (let k = 1; k <= groupItems.length; k++) {
+          const cand = groupItems[(curInGroup + k) % groupItems.length];
+          if (
+            cand.lineItemId !== item.lineItemId &&
+            !pickedItems.has(cand.lineItemId)
+          ) {
+            nextItem = cand;
+            break;
+          }
+        }
+      }
+    }
+    if (!nextItem) nextItem = itemsNow[currentIndex + 1];
     if (nextItem) {
-      setActiveLineId(nextItem.lineItemId);
-      if (
+      const markReadyToPrint = !!(
         nextItem.sku &&
         nextItem.sku === item.sku &&
         nextItem.sku !== VIRTUAL_SKU &&
         !isSwatch(nextItem)
-      ) {
-        setReadyToPrint((prev) => new Set(prev).add(nextItem.lineItemId));
+      );
+      if (pickedCount === totalCount) {
+        // Final cut of the order → "Order Complete" is showing. Hold the move until it's
+        // acknowledged (see acknowledgeCompletion), so the next line's note doesn't jump
+        // the queue.
+        setPendingAdvance({ lineItemId: nextItem.lineItemId, markReadyToPrint });
+      } else {
+        setActiveLineId(nextItem.lineItemId);
+        if (markReadyToPrint) {
+          setReadyToPrint((prev) => new Set(prev).add(nextItem.lineItemId));
+        }
       }
     }
   };
@@ -2652,8 +2751,34 @@ export default function CutListPage() {
     }, -1);
     const nextItem = itemsNow[lastSwatchIdx + 1];
     if (nextItem) {
-      setActiveLineId(nextItem.lineItemId);
+      if (pickedCount === totalCount) {
+        // Final cut → defer the move until "Order Complete" is acknowledged (same reason
+        // as openPrint). Swatch bundles have no same-SKU pre-print, so markReadyToPrint=false.
+        setPendingAdvance({
+          lineItemId: nextItem.lineItemId,
+          markReadyToPrint: false,
+        });
+      } else {
+        setActiveLineId(nextItem.lineItemId);
+      }
     }
+  };
+
+  // Dismiss the "Order Complete" modal, THEN perform any deferred move to the next line —
+  // so the next line's note/inventory alert only appears after the completion is
+  // acknowledged. Idempotent (safe if onHide + button both fire): pendingAdvance is
+  // cleared on the first call.
+  const acknowledgeCompletion = () => {
+    if (pendingAdvance) {
+      setActiveLineId(pendingAdvance.lineItemId);
+      if (pendingAdvance.markReadyToPrint) {
+        setReadyToPrint((prev) =>
+          new Set(prev).add(pendingAdvance.lineItemId),
+        );
+      }
+      setPendingAdvance(null);
+    }
+    setCompletionMessage(null);
   };
 
   const stats = getSummaryStats();
@@ -3737,7 +3862,7 @@ const cellStyle = {
         id="completion-modal"
         heading="Order Complete"
         ref={completionModalRef}
-        onHide={() => setCompletionMessage(null)}
+        onHide={() => acknowledgeCompletion()}
       >
         <s-box padding="base">
           <s-text>{completionMessage}</s-text>
@@ -3747,7 +3872,7 @@ const cellStyle = {
           variant="primary"
           onClick={() => {
             completionModalRef.current?.hideOverlay?.();
-            setCompletionMessage(null);
+            acknowledgeCompletion();
           }}
         >
           OK
