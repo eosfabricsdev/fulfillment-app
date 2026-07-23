@@ -552,6 +552,14 @@ export default function CutListPage() {
   };
   const staffMember = data.staffMember;
 
+  // Client-side "most recent cut" time per order, updated on EVERY cut (the tag timestamps
+  // only capture an order's first + final cut, so they can't reliably surface an order
+  // that a cutter came back to). Drives the Cut Log sort; resets on reload, where the tag
+  // timestamp is the fallback. Keyed by orderId.
+  const [orderLastCutAt, setOrderLastCutAt] = useState<Record<string, number>>(
+    {},
+  );
+
   const submitLogCut = (
     events: Array<{
       orderId: string;
@@ -561,6 +569,13 @@ export default function CutListPage() {
     }>,
   ) => {
     if (events.length === 0) return;
+    // Stamp each order's most-recent-cut time so the Cut Log can float it to the top.
+    const cutAt = Date.now();
+    setOrderLastCutAt((prev) => {
+      const next = { ...prev };
+      for (const e of events) next[e.orderId] = cutAt;
+      return next;
+    });
     const form = new FormData();
     form.append("intent", "logCut");
     form.append(
@@ -1917,7 +1932,10 @@ export default function CutListPage() {
         }
         orderGroups.get(item.orderId)!.push(item);
       }
-      const latestCutTime = (group: CutListItem[]): number => {
+      // Sort key = the order's most-recent cut. Prefer the client-side stamp (updated on
+      // EVERY cut this session); fall back to the latest parseable timestamp tag (which
+      // only covers first/final cut) for orders cut before a reload.
+      const latestTagTime = (group: CutListItem[]): number => {
         let latest = new Date(group[0].orderCreatedAt).getTime();
         for (const tag of group[0].orderTags) {
           const t = new Date(tag).getTime();
@@ -1925,8 +1943,10 @@ export default function CutListPage() {
         }
         return latest;
       };
+      const cutRecency = (group: CutListItem[]): number =>
+        orderLastCutAt[group[0].orderId] ?? latestTagTime(group);
       const sortedGroups = Array.from(orderGroups.values()).sort(
-        (a, b) => latestCutTime(b) - latestCutTime(a),
+        (a, b) => cutRecency(b) - cutRecency(a),
       );
       return sortedGroups.flat();
     }
