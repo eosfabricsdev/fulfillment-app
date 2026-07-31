@@ -260,14 +260,32 @@ Note: `app._index.tsx`, `app.history.tsx`, `app.diagnose.tsx` use `// @ts-nochec
   but not `read_all_orders` — older orders never reach the loader (e.g. a >90-day rush
   order shows 0 on the cut list / Rush card). Fix = request the protected `read_all_orders`
   scope (Shopify approval + merchant re-consent), then add it to `shopify.app.toml`.
-- **Cut History shows every cutter as "Unknown"** because the app authenticates with
-  **offline (app-level) tokens** — no logged-in-user identity, so `currentStaffMember`
-  is empty and `employeeName` falls back to "Unknown". The history page ALREADY groups by
-  `cutterName` per day (SQL), so the ONLY missing piece is per-user attribution. Fix =
-  switch to **online (per-user) access tokens** (`session.onlineAccessInfo.associated_user`
-  gives the name — no new scope needed); tradeoff = re-consent + ~24h token expiry churn,
-  and it touches the auth machinery, so do it as its own carefully-tested change.
-  **Deferred by client 2026-07-16.**
+- ~~**Cut History shows every cutter as "Unknown"**~~ — **FIXED 2026-07-30 (verified in dev;
+  resolved a real name).** Root cause was offline (app-level) tokens: no user identity, so
+  `currentStaffMember` returned null and `employeeName` fell back to "Unknown". **Fix: a
+  SCOPED, read-only online-token exchange in the app._index loader** — NOT an app-wide switch
+  to online tokens. `authenticate.admin(request)` returns the decoded `sessionToken` (whose
+  `.sub` = the acting user's id); we exchange the raw session token for an ONLINE access token
+  and read `associated_user.{first_name,last_name}` for the name.
+  - **Done via a DIRECT `fetch` to `https://<shop>/admin/oauth/access_token`** (grant_type
+    token-exchange, subject_token_type id_token, requested_token_type online-access-token,
+    client_id/secret from `process.env.SHOPIFY_API_KEY`/`SHOPIFY_API_SECRET`). NOTE: the
+    library's `api.auth.tokenExchange` is NOT usable here — `shopify.api` is undefined on the
+    public `shopifyApp` return (the `api` prop is on the internal `BasicParams` type only). So
+    we build the same request the library does. `RequestedTokenType.OnlineAccessToken` =
+    `"urn:shopify:params:oauth:token-type:online-access-token"`.
+  - The app's PRIMARY auth stays offline/unchanged; the online token is **never stored** (we
+    read the name and discard); any failure falls back to "Unknown" (identical to before), so
+    it can't destabilize the (now-fixed) 401/200 auth path. No new scope; the exchange is
+    silent (no re-consent).
+  - Raw session token via `getRawSessionToken()` (Bearer header on data reqs / `id_token`
+    param on document reqs). Names cached per user id (`cutterNameCache` module map) so the
+    exchange runs at most once per cutter per server instance, not on every 30s revalidation.
+  - GOTCHA: `employeeName` is captured once on client mount (`useState(data.employeeName)`),
+    and PAST `CutEvent`s keep their old "Unknown" — only NEW cuts after a fresh load get the
+    name. Testing a loader change here needs a dev-server restart + hard reload.
+  - **Still worth confirming with a SECOND cutter login** (two names attribute distinctly) and
+    in the live store, but the mechanism is proven (resolved "Katoa Price-Ahau" in dev).
 - **QUEUED (2026-07-30): `redirect_urls` / auth-path mismatch.** `shopify.server.ts` sets
   `authPathPrefix: "/auth"` (auth routes live at `/auth/*`, handled by `auth.$.tsx`), but
   `shopify.app.toml` declares `[auth] redirect_urls = ["https://fulfillment-app-two.vercel.app/api/auth"]`
@@ -286,6 +304,24 @@ Note: `app._index.tsx`, `app.history.tsx`, `app.diagnose.tsx` use `// @ts-nochec
 
 > Newest first. One entry per working session. Keep it short: what changed, why, and
 > any thread the next session should pick up.
+
+### 2026-07-30 (part 4 — per-cutter Cut History attribution)
+- **Client wants Cut History broken down by cutter (was all "Unknown").** Implemented a
+  **scoped online-token exchange** for the name, WITHOUT converting the app to online tokens
+  (client explicitly asked: only for this one function, not app-wide). See the (now struck-
+  through) "Cut History Unknown" item under Known quirks for the full mechanism. Key files:
+  `shopify.server.ts` (exports `api = shopify.api`); `app._index.tsx` loader (destructures
+  `sessionToken` from `authenticate.admin`, `getRawSessionToken()` helper + `cutterNameCache`
+  module map, replaced the dead `currentStaffMember` GraphQL query with the exchange).
+  Confirmed via node_modules: `@shopify/shopify-api@13.1.0`, `RequestedTokenType.OnlineAccessToken`
+  = `"urn:shopify:params:oauth:token-type:online-access-token"`, and `authenticate.admin`
+  returns `sessionToken: JwtPayload`. **Gotcha hit during testing:** first attempt used
+  `shopify.api.auth.tokenExchange`, but `shopify.api` is **undefined** on the public shopifyApp
+  return (`api` is only on the internal `BasicParams` type) → `TypeError: …reading 'auth'` →
+  caught → "Unknown". Rewrote as a **direct `fetch`** to `/admin/oauth/access_token` (same
+  request body the library builds, creds from env). **Verified in dev: resolved "Katoa
+  Price-Ahau".** Debug logging removed. Build clean. Still to confirm: a second cutter login +
+  live store.
 
 ### 2026-07-30 (part 3 — print window "freeze" fix)
 - **Client "print error": scan → print window pops open → "freezes"/"stuck in transit" →

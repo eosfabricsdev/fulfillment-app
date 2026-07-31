@@ -4,6 +4,27 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { useLoaderData, useRevalidator, useRouteError } from "react-router";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
+
+// Cache resolved cutter names by user id (the session token `sub`) so the online-
+// token exchange below runs at most once per cutter per server instance, not on
+// every 30s revalidation.
+const cutterNameCache = new Map<string, string>();
+
+// The raw App Bridge session token (id_token JWT). Present as the Bearer token on
+// data/fetch requests and as the `id_token` query param on document requests.
+function getRawSessionToken(request: Request): string | null {
+  const authHeader = request.headers.get("Authorization");
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    return authHeader.slice("Bearer ".length);
+  }
+  try {
+    const idToken = new URL(request.url).searchParams.get("id_token");
+    if (idToken) return idToken;
+  } catch {
+    // ignore
+  }
+  return null;
+}
 import prisma from "../db.server";
 
 const VIRTUAL_SKU = "85496775805861";
@@ -352,7 +373,7 @@ async function queryOrders(admin: any, query: string) {
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { admin, session } = await authenticate.admin(request);
+  const { admin, session, sessionToken } = await authenticate.admin(request);
 
   const mainOrdersResult = await queryOrders(
     admin,
@@ -372,30 +393,69 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const cutListItems = toCutListItems(rawOrders, { includePicked: false });
   const pickedTodayItems = toCutListItems(pickedOrders, { includePicked: true });
 
+  // Resolve the acting cutter's name for Cut History attribution. The app's
+  // primary auth is OFFLINE (app-level) tokens, which have no user identity, so
+  // `currentStaffMember` returns null and everything logged "Unknown". Instead,
+  // do a SCOPED, read-only ONLINE-token exchange here only: the App Bridge
+  // session token identifies the user (`sub`), and exchanging it for an online
+  // token yields `associated_user` (their name). This does NOT change the app's
+  // auth model — the online session is never stored, and any failure falls back
+  // to "Unknown" (identical to prior behavior). Cached per user id so it runs at
+  // most once per cutter per server instance (not on every 30s revalidation).
   let staffMember: { id: string; name: string; email: string | null } | null =
     null;
   try {
-    const staffResponse = await admin.graphql(
-      `#graphql
-      query GetCurrentStaffMember {
-        currentStaffMember {
-          id
-          name
-          email
+    const userId = sessionToken?.sub ? String(sessionToken.sub) : null;
+    const rawToken = getRawSessionToken(request);
+    if (userId) {
+      const cachedName = cutterNameCache.get(userId);
+      if (cachedName) {
+        staffMember = { id: userId, name: cachedName, email: null };
+      } else if (rawToken) {
+        // Direct token-exchange call (the library's internal `api` object isn't
+        // exposed on the public shopifyApp return, so we build the request the
+        // same way it does). Exchanges the App Bridge session token for an ONLINE
+        // access token purely to read `associated_user` (the cutter's name). The
+        // online token is discarded — the app's offline auth is untouched.
+        const exchangeResp = await fetch(
+          `https://${session.shop}/admin/oauth/access_token`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "application/json",
+            },
+            body: JSON.stringify({
+              client_id: process.env.SHOPIFY_API_KEY,
+              client_secret: process.env.SHOPIFY_API_SECRET,
+              grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+              subject_token: rawToken,
+              subject_token_type: "urn:ietf:params:oauth:token-type:id_token",
+              requested_token_type:
+                "urn:shopify:params:oauth:token-type:online-access-token",
+            }),
+          },
+        );
+        if (exchangeResp.ok) {
+          const json = await exchangeResp.json();
+          const au = json?.associated_user;
+          const fullName = [au?.first_name, au?.last_name]
+            .filter(Boolean)
+            .join(" ")
+            .trim();
+          if (fullName) {
+            cutterNameCache.set(userId, fullName);
+            staffMember = {
+              id: userId,
+              name: fullName,
+              email: au?.email ?? null,
+            };
+          }
         }
-      }`,
-    );
-    const staffJson = await staffResponse.json();
-    const sm = staffJson.data?.currentStaffMember;
-    if (sm) {
-      staffMember = {
-        id: sm.id,
-        name: sm.name,
-        email: sm.email ?? null,
-      };
+      }
     }
   } catch {
-    // ignore — fall back to unknown
+    // ignore — fall back to "Unknown" (unchanged behavior)
   }
 
   return {
