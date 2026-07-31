@@ -1,6 +1,11 @@
 import { useEffect } from "react";
 import type { LoaderFunctionArgs } from "react-router";
 import { useLoaderData } from "react-router";
+// Bundled locally (pinned to 3.11.6, the same version previously loaded from the
+// jsdelivr CDN) so the print window never depends on an external network fetch.
+// A hung/failed CDN request used to leave `script.onload` unfired → the window
+// never printed and never closed ("stuck in transit" freeze). See 2026-07-30 log.
+import JsBarcode from "jsbarcode";
 
 type LabelItem = {
   productTitle: string;
@@ -134,16 +139,15 @@ export default function PrintLabelBothPage() {
   const data = useLoaderData<typeof loader>();
 
   useEffect(() => {
-    const script = document.createElement("script");
-    script.src =
-      "https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js";
-
-    script.onload = () => {
-      const JsBarcode = (window as any).JsBarcode;
+    // Draw barcodes from the bundled library. Wrapped so that a bad barcode
+    // value can never block the print/close that follows (previously an
+    // exception here would freeze the window). Options are byte-identical to
+    // the prior CDN-based implementation, so labels render exactly the same.
+    try {
       const bin = document.querySelector("#bin-barcode") as SVGElement | null;
       const cuts = document.querySelectorAll(".cut-barcode");
 
-      if (bin && JsBarcode) {
+      if (bin) {
         JsBarcode(bin, bin.getAttribute("data-barcode-value"), {
           format: "CODE128",
           displayValue: false,
@@ -155,7 +159,6 @@ export default function PrintLabelBothPage() {
       }
 
       cuts.forEach((cut) => {
-        if (!JsBarcode) return;
         JsBarcode(cut, cut.getAttribute("data-barcode-value"), {
           format: "CODE128",
           displayValue: false,
@@ -165,20 +168,21 @@ export default function PrintLabelBothPage() {
           width: 1.4,
         });
       });
+    } catch {
+      // Barcode render failed — still print/close rather than freeze.
+    }
 
-      setTimeout(() => {
-        window.print();
-      }, 250);
-
-      window.onafterprint = () => {
-        window.close();
-      };
+    window.onafterprint = () => {
+      window.close();
     };
 
-    document.head.appendChild(script);
+    const printTimer = setTimeout(() => {
+      window.print();
+    }, 250);
 
     return () => {
-      document.head.removeChild(script);
+      clearTimeout(printTimer);
+      window.onafterprint = null;
     };
   }, []);
 
