@@ -4,13 +4,15 @@ import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
 import { useFetcher } from "react-router";
 import { authenticate } from "../shopify.server";
 
-// "Bin & Barcode" tool — scan/enter a SKU or barcode, then Replace or Add the
-// variant's Bin Number metafield (custom.bin_number). Writing variant metafields
-// is covered by the app's existing `write_products` scope (no new scope). Bins are
-// stored as a single pipe-separated string in one single_line_text_field (e.g.
-// "A2|NA"), matching the existing convention seen in the admin.
+// "Bin & Barcode" tool — scan/type barcodes or SKUs into a RUNNING LIST, then
+// Replace or Add the same Bin Number on all of them at once (EasyScan-style batch
+// bin assignment; used e.g. to consolidate many roll ends into one bin). Bins live
+// in the variant metafield custom.bin_number as a single pipe-separated string
+// (e.g. "A2|NA"), NOT a list type. Writing variant metafields is covered by the
+// app's existing `write_products` scope — no new scope.
 const BIN_NAMESPACE = "custom";
 const BIN_KEY = "bin_number";
+const SET_CHUNK = 25; // metafieldsSet accepts up to 25 metafields per call
 
 function splitBins(value: string): string[] {
   return (value || "")
@@ -31,10 +33,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (intent === "lookup") {
     const raw = String(formData.get("query") || "").trim();
-    if (!raw) {
-      return { intent, found: false, error: "Enter a SKU or barcode." };
-    }
-    // Escape quotes/backslashes so the value can't break the search query.
+    if (!raw) return { intent, found: false, error: "Enter a SKU or barcode." };
     const safe = raw.replace(/["\\]/g, "\\$&");
     const resp = await admin.graphql(
       `#graphql
@@ -60,15 +59,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     );
     const json = await resp.json();
     const edges = json?.data?.productVariants?.edges ?? [];
-    if (edges.length === 0) {
-      return { intent, found: false, query: raw };
-    }
+    if (edges.length === 0) return { intent, found: false, query: raw };
     const n = edges[0].node;
     return {
       intent,
       found: true,
       query: raw,
-      multiple: edges.length > 1,
       variant: {
         id: n.id,
         title: n.title,
@@ -82,21 +78,26 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     };
   }
 
-  if (intent === "update") {
-    const variantId = String(formData.get("variantId") || "");
+  if (intent === "updateBatch") {
     const mode = String(formData.get("mode") || ""); // "replace" | "add"
     const value = String(formData.get("value") || "").trim();
-    if (!variantId || !value || (mode !== "replace" && mode !== "add")) {
+    let ids: string[] = [];
+    try {
+      ids = JSON.parse(String(formData.get("variantIds") || "[]"));
+    } catch {
+      ids = [];
+    }
+    if (!ids.length || !value || (mode !== "replace" && mode !== "add")) {
       return { intent, ok: false, error: "Missing or invalid data." };
     }
 
-    // Re-read the current bin at write time (safe read-modify-write + authoritative
-    // duplicate check), rather than trusting a value the client fetched earlier.
-    const cur = await admin.graphql(
+    // Read every item's current bin in one shot (authoritative read-modify-write).
+    const readResp = await admin.graphql(
       `#graphql
-      query CurrentBin($id: ID!) {
-        node(id: $id) {
+      query BinsForNodes($ids: [ID!]!) {
+        nodes(ids: $ids) {
           ... on ProductVariant {
+            id
             metafield(namespace: "${BIN_NAMESPACE}", key: "${BIN_KEY}") {
               value
               type
@@ -104,51 +105,89 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           }
         }
       }`,
-      { variables: { id: variantId } },
+      { variables: { ids } },
     );
-    const curJson = await cur.json();
-    const mf = curJson?.data?.node?.metafield;
-    const currentBin = mf?.value ?? "";
-    const type = mf?.type ?? "single_line_text_field";
-
-    let newValue = value;
-    if (mode === "add") {
-      const parts = splitBins(currentBin);
-      const dup = parts.some((p) => p.toLowerCase() === value.toLowerCase());
-      if (dup) {
-        return { intent, ok: false, duplicate: true, currentBin, value };
+    const readJson = await readResp.json();
+    const nodes = readJson?.data?.nodes ?? [];
+    const curById = new Map<string, { value: string; type: string }>();
+    for (const n of nodes) {
+      if (n?.id) {
+        curById.set(n.id, {
+          value: n.metafield?.value ?? "",
+          type: n.metafield?.type ?? "single_line_text_field",
+        });
       }
-      newValue = [...parts, value].join("|");
     }
 
-    const setResp = await admin.graphql(
-      `#graphql
-      mutation SetBin($metafields: [MetafieldsSetInput!]!) {
-        metafieldsSet(metafields: $metafields) {
-          metafields { id value }
-          userErrors { field message }
+    // Compute per-item new values; collect the ones that actually need a write.
+    const results: any[] = [];
+    const toWrite: any[] = [];
+    for (const id of ids) {
+      const cur = curById.get(id);
+      if (!cur) {
+        results.push({ id, status: "error", error: "Not found" });
+        continue;
+      }
+      if (mode === "replace") {
+        toWrite.push({
+          ownerId: id,
+          namespace: BIN_NAMESPACE,
+          key: BIN_KEY,
+          type: cur.type,
+          value,
+        });
+        results.push({ id, status: "updated", newValue: value });
+      } else {
+        const parts = splitBins(cur.value);
+        if (parts.some((p) => p.toLowerCase() === value.toLowerCase())) {
+          results.push({ id, status: "duplicate", newValue: cur.value });
+        } else {
+          const nv = [...parts, value].join("|");
+          toWrite.push({
+            ownerId: id,
+            namespace: BIN_NAMESPACE,
+            key: BIN_KEY,
+            type: cur.type,
+            value: nv,
+          });
+          results.push({ id, status: "updated", newValue: nv });
         }
-      }`,
-      {
-        variables: {
-          metafields: [
-            {
-              ownerId: variantId,
-              namespace: BIN_NAMESPACE,
-              key: BIN_KEY,
-              type,
-              value: newValue,
-            },
-          ],
-        },
-      },
-    );
-    const setJson = await setResp.json();
-    const errs = setJson?.data?.metafieldsSet?.userErrors ?? [];
-    if (errs.length > 0) {
-      return { intent, ok: false, error: errs.map((e) => e.message).join("; ") };
+      }
     }
-    return { intent, ok: true, mode, previousBin: currentBin, newValue };
+
+    // Write in chunks of 25. metafieldsSet writes the valid ones and returns
+    // userErrors (with the offending index) for any that fail — map those back.
+    for (let i = 0; i < toWrite.length; i += SET_CHUNK) {
+      const chunk = toWrite.slice(i, i + SET_CHUNK);
+      const setResp = await admin.graphql(
+        `#graphql
+        mutation SetBins($metafields: [MetafieldsSetInput!]!) {
+          metafieldsSet(metafields: $metafields) {
+            metafields { id }
+            userErrors { field message }
+          }
+        }`,
+        { variables: { metafields: chunk } },
+      );
+      const setJson = await setResp.json();
+      const errs = setJson?.data?.metafieldsSet?.userErrors ?? [];
+      for (const e of errs) {
+        const idx = Array.isArray(e.field) ? parseInt(e.field[1], 10) : NaN;
+        const owner = !isNaN(idx) && chunk[idx] ? chunk[idx].ownerId : null;
+        const r = owner ? results.find((x) => x.id === owner) : null;
+        if (r) {
+          r.status = "error";
+          r.error = e.message;
+        }
+      }
+    }
+
+    const summary = {
+      updated: results.filter((r) => r.status === "updated").length,
+      duplicate: results.filter((r) => r.status === "duplicate").length,
+      error: results.filter((r) => r.status === "error").length,
+    };
+    return { intent, ok: true, mode, value, results, summary };
   }
 
   return { intent, ok: false, error: "Unknown action." };
@@ -159,66 +198,86 @@ export default function BinBarcodePage() {
   const updateFetcher = useFetcher();
 
   const [query, setQuery] = useState("");
-  const [variant, setVariant] = useState<any>(null);
+  const [scanQueue, setScanQueue] = useState<string[]>([]); // pending scans to look up
+  const [items, setItems] = useState<any[]>([]); // running list of variants
   const [newBin, setNewBin] = useState("");
-  const [confirm, setConfirm] = useState<any>(null); // { mode, currentBin, preview } | { duplicate, value }
+  const [confirm, setConfirm] = useState<any>(null); // { mode, value, count }
   const [notice, setNotice] = useState<any>(null); // { tone, text }
 
   const scanRef = useRef<any>(null);
   const confirmModalRef = useRef<any>(null);
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
+  const debounceRef = useRef<any>(null); // input-settle timer (auto-add)
+  const lastInputRef = useRef<number>(0); // timestamp of last keystroke
 
-  const looking = lookupFetcher.state !== "idle";
+  const busy = lookupFetcher.state !== "idle" || scanQueue.length > 0;
   const updating = updateFetcher.state !== "idle";
 
-  // Focus the scan field on mount.
   useEffect(() => {
     const t = setTimeout(() => scanRef.current?.focus?.(), 50);
     return () => clearTimeout(t);
   }, []);
 
-  // Handle lookup results.
+  // Serialize lookups: only one in flight at a time. A single fetcher cancels an
+  // in-flight submit when a new one fires, so rapid scanning would otherwise drop
+  // items. When the fetcher is idle and scans are queued, look up the next one.
+  useEffect(() => {
+    if (lookupFetcher.state === "idle" && scanQueue.length > 0) {
+      const next = scanQueue[0];
+      setScanQueue((q) => q.slice(1));
+      lookupFetcher.submit({ intent: "lookup", query: next }, { method: "post" });
+    }
+  }, [lookupFetcher.state, scanQueue]);
+
+  // A scan resolved → add to the running list (dedupe by variant id).
   useEffect(() => {
     const d = lookupFetcher.data;
     if (!d || d.intent !== "lookup") return;
     if (d.found) {
-      setVariant(d.variant);
-      setNewBin("");
-      setNotice(
-        d.multiple
-          ? { tone: "warning", text: "Multiple variants matched — showing the first." }
-          : null,
-      );
+      const v = d.variant;
+      if (itemsRef.current.some((it) => it.id === v.id)) {
+        setNotice({ tone: "info", text: `Already in the list: ${v.sku || v.productTitle}.` });
+      } else {
+        setItems((prev) => [...prev, { ...v, result: null }]);
+        setNotice(null);
+      }
     } else {
-      setVariant(null);
-      setNotice({
-        tone: "warning",
-        text: `No product found for "${d.query ?? query}".`,
-      });
+      setNotice({ tone: "warning", text: `No product found for "${d.query}".` });
     }
   }, [lookupFetcher.data]);
 
-  // Handle update results.
+  // Batch update finished → fold per-item results back into the list + summarize.
   useEffect(() => {
     const d = updateFetcher.data;
-    if (!d || d.intent !== "update") return;
-    if (d.ok) {
-      setVariant((v: any) => (v ? { ...v, currentBin: d.newValue } : v));
-      setNewBin("");
-      setNotice({
-        tone: "success",
-        text: `Bin Number updated${
-          d.previousBin ? ` (was "${d.previousBin}")` : ""
-        } → "${d.newValue}".`,
-      });
-      setTimeout(() => scanRef.current?.focus?.(), 50);
-    } else if (d.duplicate) {
-      setNotice({
-        tone: "warning",
-        text: `Bin Number "${d.value}" is already on this product.`,
-      });
-    } else {
+    if (!d || d.intent !== "updateBatch") return;
+    if (!d.ok) {
       setNotice({ tone: "critical", text: d.error || "Update failed." });
+      return;
     }
+    const byId = new Map(d.results.map((r: any) => [r.id, r]));
+    setItems((prev) =>
+      prev.map((it) => {
+        const r: any = byId.get(it.id);
+        if (!r) return it;
+        return {
+          ...it,
+          result: r.status,
+          currentBin: r.status === "error" ? it.currentBin : r.newValue ?? it.currentBin,
+        };
+      }),
+    );
+    setNewBin("");
+    const parts = [
+      `${d.summary.updated} updated`,
+      d.summary.duplicate ? `${d.summary.duplicate} already had it` : null,
+      d.summary.error ? `${d.summary.error} failed` : null,
+    ].filter(Boolean);
+    setNotice({
+      tone: d.summary.error ? "warning" : "success",
+      text: `${d.mode === "replace" ? "Replaced" : "Added"} "${d.value}": ${parts.join(", ")}.`,
+    });
+    setTimeout(() => scanRef.current?.focus?.(), 50);
   }, [updateFetcher.data]);
 
   // Drive the confirm modal overlay from state.
@@ -233,79 +292,117 @@ export default function BinBarcodePage() {
     }
   }, [confirm]);
 
-  const doLookup = () => {
-    const q = query.trim();
+  // Add a value to the queue and clear the field — no Enter, no button. The queue
+  // effect above looks each one up in order.
+  const enqueueScan = (raw: string) => {
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+      debounceRef.current = null;
+    }
+    const q = (raw ?? "").trim();
     if (!q) return;
-    setNotice(null);
-    lookupFetcher.submit({ intent: "lookup", query: q }, { method: "post" });
+    setScanQueue((prev) => [...prev, q]);
+    setQuery("");
+    setTimeout(() => scanRef.current?.focus?.(), 0);
   };
 
-  const startUpdate = (mode: "replace" | "add") => {
-    if (!variant) return;
+  // Auto-add when input stops arriving — no key/click needed. A barcode scanner
+  // types the whole value in a rapid burst then stops, so we settle quickly after
+  // fast input; a person typing a SKU is slower, so we wait longer before firing
+  // (and keep resetting while they type) to avoid firing mid-SKU.
+  const onScanInput = (value: string) => {
+    setQuery(value);
+    const now = Date.now();
+    const gap = now - lastInputRef.current;
+    lastInputRef.current = now;
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (!value.trim()) return;
+    const delay = gap < 40 ? 110 : 650; // burst (scanner) vs. manual typing
+    debounceRef.current = setTimeout(() => {
+      debounceRef.current = null;
+      enqueueScan(value);
+    }, delay);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, []);
+
+  const removeItem = (id: string) => {
+    setItems((prev) => prev.filter((it) => it.id !== id));
+  };
+
+  const clearAll = () => {
+    setItems([]);
+    setNotice(null);
+    setTimeout(() => scanRef.current?.focus?.(), 30);
+  };
+
+  const startApply = (mode: "replace" | "add") => {
     const value = newBin.trim();
+    if (!items.length) {
+      setNotice({ tone: "warning", text: "Scan at least one item first." });
+      return;
+    }
     if (!value) {
       setNotice({ tone: "warning", text: "Enter a Bin Number first." });
       return;
     }
-    const currentBin = variant.currentBin || "";
-    if (mode === "add") {
-      const parts = splitBins(currentBin);
-      if (parts.some((p) => p.toLowerCase() === value.toLowerCase())) {
-        setConfirm({ duplicate: true, value });
-        return;
-      }
-      setConfirm({ mode, currentBin, preview: [...parts, value].join("|"), value });
-    } else {
-      setConfirm({ mode, currentBin, preview: value, value });
-    }
+    setConfirm({ mode, value, count: items.length });
   };
 
-  const confirmUpdate = () => {
-    if (!variant || !confirm || confirm.duplicate) {
-      setConfirm(null);
-      return;
-    }
+  const confirmApply = () => {
+    if (!confirm) return;
     updateFetcher.submit(
       {
-        intent: "update",
-        variantId: variant.id,
+        intent: "updateBatch",
         mode: confirm.mode,
         value: confirm.value,
+        variantIds: JSON.stringify(items.map((it) => it.id)),
       },
       { method: "post" },
     );
     setConfirm(null);
   };
 
+  const resultBadge = (r: string | null) => {
+    if (r === "updated") return <s-badge tone="success">Updated</s-badge>;
+    if (r === "duplicate") return <s-badge tone="warning">Already had it</s-badge>;
+    if (r === "error") return <s-badge tone="critical">Failed</s-badge>;
+    return null;
+  };
+
   return (
     <s-page heading="Bin & Barcode" inlineSize="large">
-      <s-section heading="Update Bin Number">
+      <s-section heading="Scan items">
         <s-stack gap="base">
           <s-text color="subdued">
-            Scan or type a barcode or SKU, then Replace or Add the product's Bin
-            Number.
+            Scan a barcode or type a SKU — each valid item is added to the list
+            automatically (no button or Enter needed). Add as many as you like,
+            then assign one Bin Number to all of them at once.
           </s-text>
-          <s-stack direction="inline" gap="base" alignItems="end">
-            <div style={{ minWidth: "320px" }}>
+          <s-stack direction="inline" gap="base" alignItems="center">
+            <div style={{ minWidth: "340px" }}>
               <s-text-field
                 ref={scanRef}
                 label="Barcode or SKU"
                 placeholder="Scan barcode or type SKU…"
                 value={query}
-                onInput={(e: any) => setQuery(e.currentTarget.value)}
+                onInput={(e: any) => onScanInput(e.currentTarget.value)}
                 onKeyDown={(e: any) => {
+                  // Optional accelerator: if a scanner sends an Enter suffix, add
+                  // instantly instead of waiting for the input-settle timer.
                   if (e.key === "Enter") {
                     e.preventDefault();
-                    doLookup();
+                    enqueueScan(e.currentTarget.value);
                   }
                 }}
               />
             </div>
-            <s-button variant="primary" disabled={looking || !query.trim()} onClick={doLookup}>
-              {looking ? "Looking up…" : "Look up"}
-            </s-button>
+            {busy && <s-text color="subdued">Adding…</s-text>}
           </s-stack>
-
           {notice && (
             <s-banner tone={notice.tone}>
               <s-text>{notice.text}</s-text>
@@ -314,54 +411,82 @@ export default function BinBarcodePage() {
         </s-stack>
       </s-section>
 
-      {variant && (
-        <s-section heading="Product">
-          <s-box
-            padding="base"
-            background="subdued"
-            borderWidth="base"
-            borderColor="base"
-            borderRadius="base"
-          >
-            <s-stack direction="inline" gap="base" alignItems="start">
-              {variant.imageUrl && (
-                <s-image
-                  src={variant.imageUrl}
-                  alt={variant.productTitle}
-                  style={{
-                    width: "72px",
-                    height: "72px",
-                    objectFit: "cover",
-                    borderRadius: "8px",
-                  }}
-                />
-              )}
-              <s-stack gap="small">
-                <s-text type="strong">{variant.productTitle}</s-text>
-                {variant.title && variant.title !== "Default Title" && (
-                  <s-text color="subdued">{variant.title}</s-text>
-                )}
-                <s-text color="subdued">
-                  SKU: {variant.sku || "—"}
-                  {variant.barcode ? ` | Barcode: ${variant.barcode}` : ""}
-                </s-text>
-                <s-stack direction="inline" gap="small" alignItems="center">
-                  <s-text color="subdued">Current Bin:</s-text>
-                  {variant.currentBin ? (
-                    <s-badge tone="info">{variant.currentBin}</s-badge>
-                  ) : (
-                    <s-badge>None</s-badge>
-                  )}
-                </s-stack>
-              </s-stack>
+      <s-section heading={`Items (${items.length})`}>
+        {items.length === 0 ? (
+          <s-text color="subdued">No items yet — scan or type a barcode/SKU above.</s-text>
+        ) : (
+          <s-stack gap="base">
+            <s-stack gap="small">
+              {items.map((it) => (
+                <s-box
+                  key={it.id}
+                  padding="small-200"
+                  background="subdued"
+                  borderWidth="base"
+                  borderColor="base"
+                  borderRadius="base"
+                >
+                  <s-stack direction="inline" gap="base" alignItems="center">
+                    {it.imageUrl ? (
+                      <img
+                        src={it.imageUrl}
+                        alt={it.productTitle}
+                        style={{
+                          width: "48px",
+                          height: "48px",
+                          objectFit: "cover",
+                          borderRadius: "6px",
+                          display: "block",
+                        }}
+                      />
+                    ) : (
+                      <s-thumbnail alt="No image" size="small-200" />
+                    )}
+                    <div style={{ flex: "1 1 auto", minWidth: 0 }}>
+                      <s-stack gap="small-500">
+                        <s-text type="strong">{it.productTitle}</s-text>
+                        <s-text color="subdued">
+                          {it.sku ? `SKU: ${it.sku}` : ""}
+                          {it.barcode ? ` | ${it.barcode}` : ""}
+                        </s-text>
+                        <s-stack direction="inline" gap="small" alignItems="center">
+                          <s-text color="subdued">Bin:</s-text>
+                          {it.currentBin ? (
+                            <s-badge tone="info">{it.currentBin}</s-badge>
+                          ) : (
+                            <s-badge>None</s-badge>
+                          )}
+                          {resultBadge(it.result)}
+                        </s-stack>
+                      </s-stack>
+                    </div>
+                    <s-button
+                      variant="tertiary"
+                      disabled={updating}
+                      onClick={() => removeItem(it.id)}
+                    >
+                      Remove
+                    </s-button>
+                  </s-stack>
+                </s-box>
+              ))}
             </s-stack>
-          </s-box>
+            <s-stack direction="inline" gap="base">
+              <s-button variant="tertiary" disabled={updating} onClick={clearAll}>
+                Clear list
+              </s-button>
+            </s-stack>
+          </s-stack>
+        )}
+      </s-section>
 
+      {items.length > 0 && (
+        <s-section heading="Assign Bin Number">
           <s-stack gap="base">
             <div style={{ maxWidth: "320px" }}>
               <s-text-field
                 label="Bin Number"
-                placeholder="e.g. A2"
+                placeholder="e.g. B5"
                 value={newBin}
                 onInput={(e: any) => setNewBin(e.currentTarget.value)}
               />
@@ -370,59 +495,51 @@ export default function BinBarcodePage() {
               <s-button
                 variant="primary"
                 disabled={updating || !newBin.trim()}
-                onClick={() => startUpdate("replace")}
+                onClick={() => startApply("replace")}
               >
-                Replace Bin
+                Replace on all ({items.length})
               </s-button>
               <s-button
                 variant="secondary"
                 disabled={updating || !newBin.trim()}
-                onClick={() => startUpdate("add")}
+                onClick={() => startApply("add")}
               >
-                Add Bin
+                Add to all ({items.length})
               </s-button>
             </s-stack>
           </s-stack>
         </s-section>
       )}
 
-      {/* Preview + confirm (or duplicate notice). */}
       <s-modal
-        id="bin-confirm-modal"
-        heading={confirm?.duplicate ? "Already on product" : "Confirm Bin Number change"}
+        id="bin-batch-confirm"
+        heading="Confirm bin assignment"
         ref={confirmModalRef}
         onHide={() => setConfirm(null)}
       >
         <s-box padding="base">
-          {confirm?.duplicate ? (
-            <s-text>
-              Bin Number "{confirm.value}" is already on this product. Nothing to
-              add.
-            </s-text>
-          ) : (
+          {confirm && (
             <s-stack gap="small">
               <s-text>
-                {confirm?.mode === "replace" ? "Replace" : "Add"} on{" "}
-                <s-text type="strong">{variant?.productTitle}</s-text>:
+                {confirm.mode === "replace" ? "Replace" : "Add"} bin{" "}
+                <s-badge tone="info">{confirm.value}</s-badge>{" "}
+                {confirm.mode === "replace" ? "on" : "to"} all{" "}
+                <s-text type="strong">{confirm.count}</s-text> item
+                {confirm.count === 1 ? "" : "s"}?
               </s-text>
-              <s-text>
-                <s-badge>{confirm?.currentBin || "None"}</s-badge> →{" "}
-                <s-badge tone="info">{confirm?.preview}</s-badge>
+              <s-text color="subdued">
+                {confirm.mode === "replace"
+                  ? "This overwrites each item's current bin(s)."
+                  : "Items that already have this bin are skipped."}
               </s-text>
             </s-stack>
           )}
         </s-box>
-        {!confirm?.duplicate && (
-          <s-button
-            slot="primary-action"
-            variant="primary"
-            onClick={confirmUpdate}
-          >
-            Confirm
-          </s-button>
-        )}
+        <s-button slot="primary-action" variant="primary" onClick={confirmApply}>
+          Confirm
+        </s-button>
         <s-button slot="secondary-actions" onClick={() => setConfirm(null)}>
-          {confirm?.duplicate ? "OK" : "Cancel"}
+          Cancel
         </s-button>
       </s-modal>
     </s-page>

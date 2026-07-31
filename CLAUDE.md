@@ -55,7 +55,7 @@ tracks cut progress. It also logs per-cutter productivity.
 | [app/routes/app._index.tsx](app/routes/app._index.tsx) | **The app.** ~3,700 lines — loader, action, and the entire cut-list UI. Almost all work happens here. |
 | [app/routes/print-label-both.tsx](app/routes/print-label-both.tsx) | Standalone print page. Renders 57mm×25mm bin + cut labels with CODE128 barcodes (JsBarcode **bundled locally**, pinned 3.11.6 — was CDN, changed 2026-07-30), auto-prints, auto-closes. |
 | [app/routes/app.history.tsx](app/routes/app.history.tsx) | 30-day cut-productivity report (per-cutter + daily totals) from `CutEvent`. |
-| [app/routes/app.bin-barcode.tsx](app/routes/app.bin-barcode.tsx) | **"Bin & Barcode" tab** (added 2026-07-30). Scan/type a barcode or SKU → look up the variant → **Replace** or **Add** its `custom.bin_number` metafield (pipe-separated bins), with preview+confirm. Own loader+action (leaf route). More tools planned for this tab. |
+| [app/routes/app.bin-barcode.tsx](app/routes/app.bin-barcode.tsx) | **"Bin & Barcode" tab** (added 2026-07-30). **Running-list batch flow** (2026-07-31): scan/type multiple barcodes/SKUs into a list, then **Replace** or **Add** ONE `custom.bin_number` to all at once (EasyScan-style; e.g. consolidating roll ends). Own loader+action (leaf route); batch write via `nodes` read + chunked `metafieldsSet` (25/call). More tools planned for this tab. |
 | [app/routes/app.diagnose.tsx](app/routes/app.diagnose.tsx) | Debug route — runs several order queries to diagnose why an order is/isn't visible. |
 | [app/routes/app.tsx](app/routes/app.tsx) | App Bridge shell / nav. |
 | [extensions/cut-list/src/ActionExtension.tsx](extensions/cut-list/src/ActionExtension.tsx) | Shopify **order admin action** extension (~1,500 lines). |
@@ -305,6 +305,35 @@ Note: `app._index.tsx`, `app.history.tsx`, `app.diagnose.tsx` use `// @ts-nochec
 
 > Newest first. One entry per working session. Keep it short: what changed, why, and
 > any thread the next session should pick up.
+
+### 2026-07-31
+- **Bin & Barcode → running-list BATCH flow** (client request — EasyScan-style). Replaced the
+  single-item screen with a running list: each scan/Enter looks up the variant and appends it
+  (auto-dedupe by variant id), then **Replace on all** / **Add to all** applies ONE bin to
+  every item at once via a single batch confirm (no per-item preview — impractical at ~50
+  items). Client used this to consolidate ~50 roll ends from 3 half-full bins into one.
+  - Server `updateBatch` intent: one `nodes(ids:)` read of all current bins, compute per-item
+    (Replace = overwrite; Add = append + case-insensitive dedupe → "already had it", no write),
+    then `metafieldsSet` in **chunks of 25** (its per-call cap). Per-item results mapped back
+    from `userErrors[].field[1]` index; summary = updated / already-had-it / failed.
+  - **Auto-add on scan — NO Enter, NO button** (client was firm: the value landing is the only
+    action). The cut list can act on `onInput` because each row knows its expected barcode/SKU
+    (`value === item.barcode`); this tool is an open-ended server lookup with nothing to match
+    locally, so it **auto-fires when input SETTLES**: `onScanInput` sets a debounce whose delay
+    varies by input speed — `gap < 40ms` (scanner burst) → 110ms settle; slower (manual typing)
+    → 650ms (keeps resetting while they type, so it won't fire mid-SKU). Enter is kept only as
+    an *optional accelerator* for scanners that send an Enter suffix (fires instantly, cancels
+    the timer) — never required. Lookups are **serialized via a scan queue** (one fetcher in
+    flight) so rapid scanning can't drop items (the single-fetcher cancel trap); dedupe-by-id
+    makes a stray double-lookup harmless. Do NOT re-introduce a required Enter/button here.
+  - Client decisions: batch-wide mode only (all Replace or all Add — no per-item mix); Replace
+    overwrites old bins (intended, for consolidation); list rows use small 48px thumbnails
+    (the single detail view had used 150px = cut-list size). **Pending user test.**
+- **Also (earlier 2026-07-31):** single-item thumbnail switched from `<s-image>` (didn't honor
+  inline size → rendered large) to a plain `<img>` at 150px, matching the cut list. (Superseded
+  by the running-list rows above, which use 48px, but the `<img>`-not-`<s-image>` lesson stands:
+  Polaris `<s-image>` doesn't reliably size via inline style — use a plain `<img>`.)
+- Note: the pushed commit `b243f73` is the SINGLE-item version; the batch rewrite is uncommitted.
 
 ### 2026-07-30 (part 5 — "Bin & Barcode" tab: update Bin Number metafield)
 - **NEW tab "Bin & Barcode"** ([app.bin-barcode.tsx](app/routes/app.bin-barcode.tsx)), nav
