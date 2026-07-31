@@ -963,6 +963,207 @@ export default function CutListPage() {
   const scanInputRef = useRef<any>(null);
   const completionModalRef = useRef<any>(null);
 
+  // ── In-app "Command-F" list search ──────────────────────────────────────
+  // Additive overlay ONLY: highlights matching text in the currently-rendered
+  // list via the CSS Custom Highlight API (CSS.highlights). This does NOT mutate
+  // the DOM, so React's 30s auto-refresh re-render can't clobber it and it can't
+  // fight the cut/tag/print flow, sort, or filters. Scope = the <s-table> subtree
+  // only (list rows), not the summary cards. Re-runs on data refresh via a
+  // MutationObserver so counts/highlights stay live.
+  const [searchQuery, setSearchQuery] = useState<string>("");
+  const [searchMatchCount, setSearchMatchCount] = useState<number>(0);
+  const [searchCurrentMatch, setSearchCurrentMatch] = useState<number>(0); // 1-based; 0 = none
+  const searchQueryRef = useRef<string>("");
+  const searchCurrentRef = useRef<number>(0);
+  const searchRangesRef = useRef<Range[]>([]);
+  const searchContainerRef = useRef<any>(null);
+  const stickyHeaderRef = useRef<any>(null);
+  const SEARCH_HL = "cutlist-search";
+  const SEARCH_HL_CURRENT = "cutlist-search-current";
+
+  // Register the highlight colors once (::highlight() pseudo-elements).
+  useEffect(() => {
+    const style = document.createElement("style");
+    style.textContent = `
+      ::highlight(${SEARCH_HL}) { background-color: #ffe08a; color: inherit; }
+      ::highlight(${SEARCH_HL_CURRENT}) { background-color: #ff9d00; color: #111; }
+    `;
+    document.head.appendChild(style);
+    return () => {
+      try {
+        document.head.removeChild(style);
+      } catch {
+        // ignore
+      }
+    };
+  }, []);
+
+  const applySearchHighlights = useCallback(() => {
+    // @ts-ignore - CSS Custom Highlight API
+    if (typeof CSS === "undefined" || !CSS.highlights) return;
+    const ranges = searchRangesRef.current;
+    // @ts-ignore
+    CSS.highlights.delete(SEARCH_HL);
+    // @ts-ignore
+    CSS.highlights.delete(SEARCH_HL_CURRENT);
+    if (!ranges.length) return;
+    // @ts-ignore - Highlight is a global provided by the API
+    CSS.highlights.set(SEARCH_HL, new Highlight(...ranges));
+    const cur = searchCurrentRef.current;
+    if (cur >= 1 && ranges[cur - 1]) {
+      // @ts-ignore
+      const curHl = new Highlight(ranges[cur - 1]);
+      curHl.priority = 1; // paint the active match on top of the general set
+      // @ts-ignore
+      CSS.highlights.set(SEARCH_HL_CURRENT, curHl);
+    }
+  }, []);
+
+  const recomputeSearch = useCallback(() => {
+    const query = searchQueryRef.current.trim().toLowerCase();
+    const container = searchContainerRef.current;
+    const ranges: Range[] = [];
+    if (query && container && typeof Range !== "undefined") {
+      const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+      let node: Node | null;
+      while ((node = walker.nextNode())) {
+        const text = (node.nodeValue || "").toLowerCase();
+        if (!text) continue;
+        let idx = text.indexOf(query);
+        while (idx !== -1) {
+          try {
+            const range = new Range();
+            range.setStart(node, idx);
+            range.setEnd(node, idx + query.length);
+            ranges.push(range);
+          } catch {
+            // ignore malformed ranges
+          }
+          idx = text.indexOf(query, idx + query.length);
+        }
+      }
+    }
+    searchRangesRef.current = ranges;
+    let cur = searchCurrentRef.current;
+    if (ranges.length === 0) cur = 0;
+    else if (cur < 1) cur = 1;
+    else if (cur > ranges.length) cur = ranges.length;
+    searchCurrentRef.current = cur;
+    setSearchMatchCount(ranges.length);
+    setSearchCurrentMatch(cur);
+    applySearchHighlights();
+  }, [applySearchHighlights]);
+
+  const scrollToCurrentMatch = useCallback(() => {
+    const ranges = searchRangesRef.current;
+    const cur = searchCurrentRef.current;
+    const range = ranges[cur - 1];
+    if (!range) return;
+    // Polaris <s-text>/<s-table-cell>/<s-table-row> are all `display: contents`
+    // (no layout box), so element.scrollIntoView on them is a no-op OR resolves
+    // to a giant ancestor (the whole table). Instead read the *Range's* own
+    // rectangle — that's the true rendered position of the matched text — and
+    // scroll the real scroll container by the exact delta to center it.
+    let rect: DOMRect | null = null;
+    try {
+      rect = range.getBoundingClientRect();
+    } catch {
+      rect = null;
+    }
+    if (!rect || (rect.width === 0 && rect.height === 0)) return;
+
+    // Find the nearest scrollable ancestor; null => the page/window scrolls.
+    let scroller: any = range.startContainer?.parentElement ?? null;
+    while (
+      scroller &&
+      scroller !== document.body &&
+      scroller !== document.documentElement
+    ) {
+      const style = window.getComputedStyle(scroller);
+      const oy = style.overflowY;
+      if (
+        (oy === "auto" || oy === "scroll" || oy === "overlay") &&
+        scroller.scrollHeight > scroller.clientHeight + 1
+      ) {
+        break;
+      }
+      scroller = scroller.parentElement;
+    }
+    const isWindowScroller =
+      !scroller ||
+      scroller === document.body ||
+      scroller === document.documentElement;
+
+    // Usable viewport. For the window, the sticky header overlays the top, so
+    // treat the header's bottom edge as the top boundary (a centered match could
+    // otherwise slip under it). For an element scroller, use its own box.
+    const margin = 16;
+    let viewTop: number;
+    let viewBottom: number;
+    if (isWindowScroller) {
+      viewTop = stickyHeaderRef.current?.getBoundingClientRect?.().bottom ?? 0;
+      viewBottom = window.innerHeight || document.documentElement.clientHeight;
+    } else {
+      const sRect = scroller.getBoundingClientRect();
+      viewTop = sRect.top;
+      viewBottom = sRect.bottom;
+    }
+
+    // Already fully visible → do nothing (real Cmd-F leaves the page put).
+    if (rect.top >= viewTop + margin && rect.bottom <= viewBottom - margin) {
+      return;
+    }
+
+    // Off-screen → nudge just enough to bring it into view (no re-centering).
+    let delta = 0;
+    if (rect.top < viewTop + margin) {
+      delta = rect.top - (viewTop + margin);
+    } else {
+      delta = rect.bottom - (viewBottom - margin);
+    }
+    if (isWindowScroller) {
+      window.scrollBy({ top: delta, behavior: "smooth" });
+    } else {
+      scroller.scrollBy({ top: delta, behavior: "smooth" });
+    }
+  }, []);
+
+  const stepSearchMatch = useCallback(
+    (delta: number) => {
+      const ranges = searchRangesRef.current;
+      if (!ranges.length) return;
+      let cur = searchCurrentRef.current || 1;
+      cur = ((cur - 1 + delta + ranges.length) % ranges.length) + 1;
+      searchCurrentRef.current = cur;
+      setSearchCurrentMatch(cur);
+      applySearchHighlights();
+      scrollToCurrentMatch();
+    },
+    [applySearchHighlights, scrollToCurrentMatch],
+  );
+
+  // Recompute when the query changes; on a new query, jump to the first match.
+  useEffect(() => {
+    searchQueryRef.current = searchQuery;
+    searchCurrentRef.current = searchQuery ? 1 : 0;
+    recomputeSearch();
+    if (searchQuery) scrollToCurrentMatch();
+  }, [searchQuery, recomputeSearch, scrollToCurrentMatch]);
+
+  // Keep highlights live across list re-renders (30s refresh, filter changes,
+  // optimistic updates). CSS highlights don't mutate the DOM, so re-applying
+  // them can't retrigger this observer — no loop.
+  useEffect(() => {
+    const container = searchContainerRef.current;
+    if (!container) return;
+    const obs = new MutationObserver(() => {
+      if (searchQueryRef.current) recomputeSearch();
+    });
+    obs.observe(container, { childList: true, subtree: true, characterData: true });
+    return () => obs.disconnect();
+  }, [recomputeSearch]);
+  // ─────────────────────────────────────────────────────────────────────────
+
   useEffect(() => {
     const el = completionModalRef.current;
     if (!el) return;
@@ -1011,6 +1212,49 @@ export default function CutListPage() {
       // ignore
     }
   }, [moveToCutListConfirm]);
+
+  // Re-sync the imperatively-opened modal overlays when the tab regains focus.
+  // On a final cut the print window steals focus the instant showOverlay() runs
+  // (and on a non-final cut the auto-advance can open the next line's note modal
+  // right as the print window opens), which can leave App Bridge's backdrop
+  // half-open — scrim painted, box not — and stuck, since the showOverlay effects
+  // above only re-run when their state *changes*. Re-asserting each overlay to its
+  // current state on return repaints an open modal or clears a stray scrim. This
+  // is a SEPARATE listener from the token-refresh onVisible handler (does not touch
+  // the auto-refresh rules); showOverlay/hideOverlay are idempotent, and an
+  // already-acknowledged modal has null state → only hideOverlay, so it never re-pops.
+  const completionMessageRef = useRef(completionMessage);
+  completionMessageRef.current = completionMessage;
+  const noteModalContentRef = useRef(noteModalContent);
+  noteModalContentRef.current = noteModalContent;
+  const moveToCutListConfirmRef = useRef(moveToCutListConfirm);
+  moveToCutListConfirmRef.current = moveToCutListConfirm;
+
+  useEffect(() => {
+    const resyncOverlays = () => {
+      if (document.visibilityState !== "visible") return;
+      const syncs: Array<[any, boolean]> = [
+        [completionModalRef.current, !!completionMessageRef.current],
+        [noteModalRef.current, !!noteModalContentRef.current],
+        [moveToCutListModalRef.current, !!moveToCutListConfirmRef.current],
+      ];
+      for (const [el, shouldShow] of syncs) {
+        if (!el) continue;
+        try {
+          if (shouldShow) el.showOverlay?.();
+          else el.hideOverlay?.();
+        } catch {
+          // ignore
+        }
+      }
+    };
+    document.addEventListener("visibilitychange", resyncOverlays);
+    window.addEventListener("focus", resyncOverlays);
+    return () => {
+      document.removeEventListener("visibilitychange", resyncOverlays);
+      window.removeEventListener("focus", resyncOverlays);
+    };
+  }, []);
 
   // Position-lock (replaces the old time-anchor `skuAnchorTimes`). The currently ACTIVE
   // SKU group is pinned in place on the main cut list. `sku` = the locked fabric; `order`
@@ -2822,6 +3066,7 @@ export default function CutListPage() {
   return (
     <s-page heading="Fulfillment Cut List" inlineSize="large">
       <div
+        ref={stickyHeaderRef}
         style={{
           position: "sticky",
           top: 0,
@@ -3070,6 +3315,55 @@ export default function CutListPage() {
           </s-box>
         </div>
       </s-section>
+      <s-section padding="none">
+        <s-stack direction="inline" gap="base" alignItems="center">
+          <div style={{ minWidth: "260px" }}>
+            <s-text-field
+              label="Search list"
+              labelAccessibilityVisibility="exclusive"
+              placeholder="🔍 Search this list…"
+              value={searchQuery}
+              onInput={(e: any) => setSearchQuery(e.currentTarget.value)}
+              onKeyDown={(e: any) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  stepSearchMatch(e.shiftKey ? -1 : 1);
+                } else if (e.key === "Escape") {
+                  setSearchQuery("");
+                }
+              }}
+            />
+          </div>
+          <s-text color="subdued">
+            {searchQuery
+              ? searchMatchCount > 0
+                ? `${searchCurrentMatch} / ${searchMatchCount}`
+                : "No matches"
+              : ""}
+          </s-text>
+          <s-button
+            variant="tertiary"
+            disabled={searchMatchCount === 0}
+            onClick={() => stepSearchMatch(-1)}
+          >
+            ↑ Prev
+          </s-button>
+          <s-button
+            variant="tertiary"
+            disabled={searchMatchCount === 0}
+            onClick={() => stepSearchMatch(1)}
+          >
+            ↓ Next
+          </s-button>
+          <s-button
+            variant="tertiary"
+            disabled={!searchQuery}
+            onClick={() => setSearchQuery("")}
+          >
+            Clear
+          </s-button>
+        </s-stack>
+      </s-section>
       {newRushAlerts.length > 0 && (
         <s-section>
           <s-stack gap="small">
@@ -3126,6 +3420,7 @@ export default function CutListPage() {
 
       <s-section padding="none">
         <s-table
+          ref={searchContainerRef}
           paginate={false}
           loading={loading}
           hasNextPage={false}

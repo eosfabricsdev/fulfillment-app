@@ -53,7 +53,7 @@ tracks cut progress. It also logs per-cutter productivity.
 | File | Role |
 |---|---|
 | [app/routes/app._index.tsx](app/routes/app._index.tsx) | **The app.** ~3,700 lines — loader, action, and the entire cut-list UI. Almost all work happens here. |
-| [app/routes/print-label-both.tsx](app/routes/print-label-both.tsx) | Standalone print page. Renders 57mm×25mm bin + cut labels with CODE128 barcodes (JsBarcode via CDN), auto-prints, auto-closes. |
+| [app/routes/print-label-both.tsx](app/routes/print-label-both.tsx) | Standalone print page. Renders 57mm×25mm bin + cut labels with CODE128 barcodes (JsBarcode **bundled locally**, pinned 3.11.6 — was CDN, changed 2026-07-30), auto-prints, auto-closes. |
 | [app/routes/app.history.tsx](app/routes/app.history.tsx) | 30-day cut-productivity report (per-cutter + daily totals) from `CutEvent`. |
 | [app/routes/app.diagnose.tsx](app/routes/app.diagnose.tsx) | Debug route — runs several order queries to diagnose why an order is/isn't visible. |
 | [app/routes/app.tsx](app/routes/app.tsx) | App Bridge shell / nav. |
@@ -273,6 +273,114 @@ Note: `app._index.tsx`, `app.history.tsx`, `app.diagnose.tsx` use `// @ts-nochec
 
 > Newest first. One entry per working session. Keep it short: what changed, why, and
 > any thread the next session should pick up.
+
+### 2026-07-30 (part 3 — print window "freeze" fix)
+- **Client "print error": scan → print window pops open → "freezes"/"stuck in transit" →
+  item still leaves the list.** Reported on orders 103781/93902 (final cut, 10 AM), and
+  yesterday 103796/49425 (4:54 PM), 103798/68532 (5:08 PM), 103799/91705 (5:20 PM) — different
+  fabrics, intermittent.
+- **Root cause:** [print-label-both.tsx](app/routes/print-label-both.tsx) loaded JsBarcode from
+  the **jsdelivr CDN** via an injected `<script>`, and put ALL of barcode-draw + `window.print()`
+  + `window.close()` inside `script.onload`. No `onerror`, no timeout. When the CDN request
+  **hung or failed** (flaky network), `onload` never fired → the window never printed and never
+  closed = the freeze. The item "goes away" because `openPrint` records the cut + writes tags
+  BEFORE opening the print window (locked flow, unchanged). Affected all print paths (bin/cut/
+  swatch) since they all open this page.
+- **Fix (client approved — locked print flow, so confirmed scope first): bundle JsBarcode
+  locally.** Added `jsbarcode` as a dep **pinned to 3.11.6** (the exact CDN version), `import`ed
+  it, and draw barcodes directly — **no external fetch**, so the CDN-hang freeze can't happen.
+  Wrapped the draw in try/catch + kept the 250ms print timer OUTSIDE it, so a bad barcode value
+  now still prints/closes instead of freezing. **Labels are byte-identical** — same version,
+  same CODE128 options (heights 11/10, width 1.4, margin 0, displayValue false), same label
+  HTML/CSS/info/assembly, same cut→tag→print sequence. ONLY the library *source* changed (CDN →
+  bundle) + the never-freeze safety. Print bundle 6→68 kB (expected: JsBarcode now included).
+  Build clean. **Verified by user: printed twice, works as expected.**
+- **Follow-on bug found + fixed: stuck modal backdrop after returning from the print window.**
+  On a final cut the "Order Complete" modal `showOverlay()`s and then `window.open` steals
+  focus in the same tick, so App Bridge left the backdrop **half-open (scrim painted, no box)
+  and stuck** — cleared only by another modal cycle. Same risk for a non-final cut's
+  auto-advance opening the next line's note modal as the print window opens. The three
+  imperatively-opened modals (completion/note/moveToCutList) only re-sync when their *state*
+  changes, so nothing fixed it on return. **Fix (additive, ~40 lines):** a NEW focus/
+  visibilitychange listener that re-asserts each of those overlays to its current state on
+  return (state set → showOverlay repaints; null → hideOverlay clears the scrim). Uses mirror
+  refs (`completionMessageRef`/`noteModalContentRef`/`moveToCutListConfirmRef`). SEPARATE from
+  the locked `primeTokenAndRevalidate` onVisible handler — does not touch auto-refresh rules;
+  idempotent; can't re-pop an acknowledged modal (null state → only hideOverlay). Build clean.
+  **Pending user test.**
+
+### 2026-07-30 (part 2 — "200" screen / recurring 401s → library upgrade)
+- **Client reported a bare white "200" screen** (black "200" text) + more 401s. Partial URL
+  showed it was on **`/auth/session-token?...`** — the App Bridge embedded **session-token
+  bounce page**. So the "200" and the 401s are the SAME root: the embedded re-auth handshake
+  failing/stranding, NOT app logic (grepped every route — nothing emits a bare "200"/"401").
+- **Ruled OUT the database** (I initially suspected it — corrected course):
+  - The app has its **own** Supabase DB (ref `nqncfqpgalttqhndeucr`); the Supabase MCP in my
+    session is connected to a DIFFERENT project (`bvvmmhekdgskeilczeuy` "afG Tracking Methods",
+    a heavy analytics DB) — do NOT analyze that one for app auth issues. Saved as memory
+    [[eos-supabase-databases]].
+  - Prod `DATABASE_URL` confirmed on the app's own DB, port **5432** (session-mode pooler).
+  - Pulled 24h of the app DB's OWN logs (user CSV export): **nearly idle** — routine
+    checkpoints (2–12 buffers), NO `too many clients`/connection-slot errors, NO statement
+    timeouts. So connection exhaustion is NOT happening. The 5432→6543 transaction-pooler
+    tweak is optional hardening, **not** the cause — deprioritized.
+- **Fix (evidence-based): upgraded `@shopify/shopify-app-react-router` 1.1.0 → 1.2.1.**
+  The 1.2.1 changelog fixes EXACTLY this: *"embedded apps would incorrectly show the login
+  page when `shop` or `host` query params were missing from a document request"* → now shows
+  a minimal App Bridge page that fetches the session token from the parent frame for seamless
+  re-auth. (Also a security fix: `authenticate.admin().redirect()` no longer leaks embedded
+  params cross-origin.) Webhook handlers verified compatible (they only use stable
+  `shop`/`session`/`topic`/`payload` fields; 1.2.0's webhook-type change only ADDED fields).
+  Build clean; only package.json/lock changed. **Pending: user tests embedded auth in dev,
+  then deploys; real confirmation = a few days of live cutting with no 200/401 (timing
+  doesn't repro in a dev tunnel).**
+- **Note — typecheck was already broken pre-upgrade** (unrelated): `shopify-web-components.d.ts`
+  is a JSON config misnamed `.d.ts`, so `tsc --noEmit` errors on it. Not ours, not the upgrade.
+  Use `npm run build` (clean) as the gate, per existing convention.
+- **Open follow-ups (deferred, independent of the upgrade):** (1) `authPathPrefix: "/auth"`
+  (shopify.server.ts) vs `shopify.app.toml` `redirect_urls = [".../api/auth"]` mismatch —
+  no `/api/auth` route exists; reconcile as its own scoped change. (2) optional 5432→6543
+  transaction pooler + `DIRECT_URL`.
+
+### 2026-07-30
+- **NEW: in-app "Command-F" list search** (client request — cutters can't use the browser's
+  Cmd-F because it also finds text outside the app window). Added an **always-visible search
+  bar** in the sticky header (client chose always-visible, no keyboard shortcut). Type a
+  string → matches in the current list are highlighted, a `n / N` match count shows, and
+  **↑ Prev / ↓ Next** (or Enter / Shift-Enter in the field, Esc to clear) step through
+  matches, scrolling each into view.
+  - **Implementation is a pure ADDITIVE overlay — touches no locked function.** Highlighting
+    uses the **CSS Custom Highlight API** (`CSS.highlights` + `Range` + `::highlight()`),
+    which does **NOT mutate the DOM** — so the 30s auto-refresh re-render can't clobber it and
+    it can't fight the cut/tag/print flow, sort, or filters. Scope is the `<s-table>` subtree
+    only (`searchContainerRef`), i.e. list rows, not the summary cards. A **MutationObserver**
+    on the table re-runs the search after each list re-render (refresh / filter change /
+    optimistic update) so counts + highlights stay live; re-applying highlights doesn't mutate
+    DOM so it can't loop the observer. Works on **every** filter/list automatically since it
+    reads whatever the table currently renders.
+  - Search state: `searchQuery`, `searchMatchCount`, `searchCurrentMatch` (+ `*Ref` mirrors
+    for the observer/callbacks); helpers `recomputeSearch` / `applySearchHighlights` /
+    `stepSearchMatch` / `scrollToCurrentMatch`. Highlight names `cutlist-search` (all,
+    #ffe08a) + `cutlist-search-current` (active, #ff9d00, `priority=1`). Injected `<style>`
+    for the two pseudo-elements.
+  - **Scroll-to-match (`scrollToCurrentMatch`) — non-obvious, got it wrong twice first:**
+    Polaris `<s-text>`/`<s-table-cell>`/`<s-table-row>` are all `display: contents` (no
+    layout box), so `element.scrollIntoView()` is a no-op OR resolves to a giant ancestor
+    (whole `<s-table>`) and jumps to the table's middle. FIX: read the **Range's own**
+    `getBoundingClientRect()` (true rendered position of the matched text), find the real
+    scroll container (nearest `overflowY: auto/scroll` ancestor with overflow; else the
+    window), and **only scroll if the match is not already fully visible** — then nudge the
+    *minimum* to bring it into view (no re-centering; real-Cmd-F feel). The window path uses
+    the sticky-header bottom (`stickyHeaderRef`) as the top boundary so a match can't hide
+    under the sticky summary cards. Re-centering every step (my first working version) yanked
+    already-visible matches off-screen — don't do that.
+  - **VERIFIED by user** in the demo store (highlights render over Polaris rows; count +
+    Prev/Next + scroll all correct). Browser note: CSS Custom Highlight API needs Chrome/Edge
+    105+ / Safari 17.2+ (warehouse runs Chrome — fine); it paints over light-DOM text slotted
+    into the Polaris `<s-*>` shadow DOM. Text rendered via an attribute (not a light-DOM text
+    node) won't highlight — acceptable (customer/order#/title/SKU/bin/tags are all text
+    children). Fallback if ever needed: React `<mark>`-wrap of row text (more invasive).
+  - Builds clean (`npm run build`). **Uncommitted — user will push.**
 
 ### 2026-07-21
 - **Added the top-of-file REGRESSION GUARD protocol** (client request): before any edit,
