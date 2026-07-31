@@ -268,6 +268,19 @@ Note: `app._index.tsx`, `app.history.tsx`, `app.diagnose.tsx` use `// @ts-nochec
   gives the name — no new scope needed); tradeoff = re-consent + ~24h token expiry churn,
   and it touches the auth machinery, so do it as its own carefully-tested change.
   **Deferred by client 2026-07-16.**
+- **QUEUED (2026-07-30): `redirect_urls` / auth-path mismatch.** `shopify.server.ts` sets
+  `authPathPrefix: "/auth"` (auth routes live at `/auth/*`, handled by `auth.$.tsx`), but
+  `shopify.app.toml` declares `[auth] redirect_urls = ["https://fulfillment-app-two.vercel.app/api/auth"]`
+  — a route that **doesn't exist** (stale value from an older template). Currently **dormant/
+  harmless** because the app authenticates via **token exchange** (App Bridge session token),
+  which never uses the OAuth redirect; but a fresh **install/reinstall** or a **scope change**
+  could invoke the redirect flow and hit the dead `/api/auth` → install/re-grant failure. NOT
+  the cause of the "200"/401 (that was the session-token bounce, fixed by the 1.2.1 upgrade —
+  see 2026-07-30 part 2). **Fix = point `redirect_urls` at the real `/auth` callback path the
+  1.2.1 library expects** (verify the exact path first), then **`shopify app deploy`** to push
+  the config to Shopify (a code push alone won't update it). Touches auth config + needs a
+  config deploy, so do it as its own carefully-tested change (`shopify app dev` first).
+  **Deferred by client 2026-07-30** — park until the current deploy is watched for a few days.
 
 ## Session Log
 
