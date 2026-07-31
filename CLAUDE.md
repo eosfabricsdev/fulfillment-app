@@ -55,6 +55,7 @@ tracks cut progress. It also logs per-cutter productivity.
 | [app/routes/app._index.tsx](app/routes/app._index.tsx) | **The app.** ~3,700 lines — loader, action, and the entire cut-list UI. Almost all work happens here. |
 | [app/routes/print-label-both.tsx](app/routes/print-label-both.tsx) | Standalone print page. Renders 57mm×25mm bin + cut labels with CODE128 barcodes (JsBarcode **bundled locally**, pinned 3.11.6 — was CDN, changed 2026-07-30), auto-prints, auto-closes. |
 | [app/routes/app.history.tsx](app/routes/app.history.tsx) | 30-day cut-productivity report (per-cutter + daily totals) from `CutEvent`. |
+| [app/routes/app.bin-barcode.tsx](app/routes/app.bin-barcode.tsx) | **"Bin & Barcode" tab** (added 2026-07-30). Scan/type a barcode or SKU → look up the variant → **Replace** or **Add** its `custom.bin_number` metafield (pipe-separated bins), with preview+confirm. Own loader+action (leaf route). More tools planned for this tab. |
 | [app/routes/app.diagnose.tsx](app/routes/app.diagnose.tsx) | Debug route — runs several order queries to diagnose why an order is/isn't visible. |
 | [app/routes/app.tsx](app/routes/app.tsx) | App Bridge shell / nav. |
 | [extensions/cut-list/src/ActionExtension.tsx](extensions/cut-list/src/ActionExtension.tsx) | Shopify **order admin action** extension (~1,500 lines). |
@@ -304,6 +305,24 @@ Note: `app._index.tsx`, `app.history.tsx`, `app.diagnose.tsx` use `// @ts-nochec
 
 > Newest first. One entry per working session. Keep it short: what changed, why, and
 > any thread the next session should pick up.
+
+### 2026-07-30 (part 5 — "Bin & Barcode" tab: update Bin Number metafield)
+- **NEW tab "Bin & Barcode"** ([app.bin-barcode.tsx](app/routes/app.bin-barcode.tsx)), nav
+  link added in app.tsx under Cut History. First tool: scan/type a **barcode or SKU** → looks
+  up the variant (`productVariants(query: "sku:X OR barcode:X")`, takes first match) → shows
+  product/image/SKU/barcode + current Bin → **Replace** or **Add** the `custom.bin_number`
+  variant metafield via `metafieldsSet`, with a **preview+confirm** modal.
+  - **Scope: already covered by `write_products`** (variant metafield write) — NO new scope,
+    no re-consent. (Verify once in dev that the `custom.bin_number` *definition* allows app
+    writes, not merchant-read-only — almost certainly yes since another app writes it.)
+  - Bins are a single pipe-separated string in one `single_line_text_field` (e.g. "A2|NA"),
+    NOT a list metafield. **Add** dedupes case-insensitively; a duplicate → no write + modal
+    "Bin Number already on product." **Replace** overwrites. Write re-reads current bin at
+    write time (authoritative read-modify-write) and reuses the metafield's existing `type`.
+  - Client decisions (2026-07-30): dedupe+notice on Add; live store SKUs are always unique to
+    one variant (swatches use swatch SKU, piece variants lead with 0s), so lookup safely takes
+    the first match; preview+confirm required; tab named "Bin & Barcode" (anticipates a 2nd
+    barcode tool the client mentioned). Build clean. **Pending user test in dev/demo.**
 
 ### 2026-07-30 (part 4 — per-cutter Cut History attribution)
 - **Client wants Cut History broken down by cutter (was all "Unknown").** Implemented a
