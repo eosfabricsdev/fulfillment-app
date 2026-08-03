@@ -458,12 +458,35 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     // ignore — fall back to "Unknown" (unchanged behavior)
   }
 
+  // Most recent cut for THIS cutter, read from the persistent CutEvent log. Powers the
+  // "Reprint last cut" strip so an item whose print froze is one click to re-print — and
+  // because it comes from the DB (not client state), it survives a browser close/crash.
+  let lastCut: {
+    orderName: string | null;
+    lineItemId: string;
+    sku: string | null;
+  } | null = null;
+  try {
+    const evt = await prisma.cutEvent.findFirst({
+      where: {
+        shop: session.shop,
+        ...(staffMember?.name ? { cutterName: staffMember.name } : {}),
+      },
+      orderBy: { createdAt: "desc" },
+      select: { orderName: true, lineItemId: true, sku: true },
+    });
+    if (evt) lastCut = evt;
+  } catch {
+    // ignore — strip just won't show
+  }
+
   return {
     cutListItems,
     pickedTodayItems,
     shop: session.shop,
     staffMember,
     employeeName: staffMember?.name || "Unknown",
+    lastCut,
   };
 };
 
@@ -2755,6 +2778,29 @@ export default function CutListPage() {
     window.open(url, "_blank");
   };
 
+  // "Reprint last cut" — the most recent cut for this cutter (from the DB, via the loader),
+  // matched back to a currently-loaded item so we have the full details to reprint. Reprints
+  // BOTH labels (bin + product) in one window. Refreshes whenever the app revalidates (incl.
+  // when focus returns after a print window closes), so a frozen print is one click to redo.
+  const lastCut = data.lastCut;
+  const lastCutItem: CutListItem | null =
+    (lastCut &&
+      (pickedTodayItems.find((i) => i.lineItemId === lastCut.lineItemId) ||
+        cutListItems.find((i) => i.lineItemId === lastCut.lineItemId))) ||
+    null;
+
+  const reprintLastCut = async () => {
+    if (!lastCutItem) return;
+    const item = lastCutItem;
+    const substitutes = isSilkSwatchNeedingSubstitute(item)
+      ? await resolveSilkSubstitutes([item])
+      : new Map<string, SubstituteResult>();
+    const expanded = expandSilkSwatchForPrint(item, substitutes);
+    const itemsParam = encodeURIComponent(JSON.stringify(expanded));
+    const url = `/print-label-both?orderName=${encodeURIComponent(item.orderName)}&items=${itemsParam}&includeBin=true&includeCut=true`;
+    window.open(url, "_blank");
+  };
+
   const moveItemsToCutList = (items: CutListItem[]) => {
     if (items.length === 0) return;
     const orderId = items[0].orderId;
@@ -3422,6 +3468,46 @@ export default function CutListPage() {
           >
             Clear
           </s-button>
+
+          {lastCut && (
+            <>
+              <div style={{ flex: "1 1 auto" }} />
+              <s-box
+                padding="small-200"
+                background="subdued"
+                borderWidth="base"
+                borderColor="base"
+                borderRadius="base"
+              >
+                <s-stack direction="inline" gap="small" alignItems="center">
+                  <s-badge tone="info">Last cut</s-badge>
+                  <s-text type="strong">{lastCut.orderName || "—"}</s-text>
+                  {lastCutItem?.productTitle && (
+                    <div
+                      style={{
+                        maxWidth: "240px",
+                        whiteSpace: "nowrap",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                      }}
+                    >
+                      <s-text color="subdued">{lastCutItem.productTitle}</s-text>
+                    </div>
+                  )}
+                  {lastCut.sku && (
+                    <s-text color="subdued">SKU: {lastCut.sku}</s-text>
+                  )}
+                  <s-button
+                    variant="primary"
+                    disabled={!lastCutItem}
+                    onClick={reprintLastCut}
+                  >
+                    Reprint
+                  </s-button>
+                </s-stack>
+              </s-box>
+            </>
+          )}
         </s-stack>
       </s-section>
       {newRushAlerts.length > 0 && (

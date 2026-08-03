@@ -306,6 +306,68 @@ Note: `app._index.tsx`, `app.history.tsx`, `app.diagnose.tsx` use `// @ts-nochec
 > Newest first. One entry per working session. Keep it short: what changed, why, and
 > any thread the next session should pick up.
 
+### 2026-08-03
+- **NEW: "Reprint last cut" strip** (client request — crash-proof freeze recovery). Sits in the
+  open space to the right of the search bar; shows **Order No · Product Title · SKU** + a
+  **Reprint** button (reprints BOTH bin + product labels in one window). Source is the
+  **persistent `CutEvent` DB, read in the loader** (`prisma.cutEvent.findFirst`, most recent for
+  the current cutter by `cutterName`, falls back to most-recent-for-shop if name unknown) → so it
+  **survives a browser close/crash/relogin** (it's DB-derived, NOT client state like undo). The
+  loader returns `lastCut {orderName, lineItemId, sku}`; the client matches `lineItemId` to a
+  loaded `pickedTodayItems`/`cutListItems` entry to get Product Title + full reprint data. Does
+  NOT touch the locked `openPrint`/cut flow. Refreshes on revalidation — incl. the focus-return
+  revalidation when a print window closes — so a frozen print shows up in the strip within ~1-2s.
+  CAVEAT: Product Title + the Reprint action need the item still in the loaded lists (true right
+  after a cut; if the order later ships/drops, button disables but Order#/SKU still show). Build
+  clean. Pending push.
+- **Print freeze recurred ONCE (down from several/day) — added a fallback auto-close to the
+  print window.** Anita, order 103861/93884, bin label, ~9:55 ET; window froze, she closed the
+  browser to escape. Vercel logs (app's own project `prj_LMeN…`) confirm the app served every
+  `print-label-both` request for that order in <20ms (200) — so app/CDN-bundle side is fine;
+  the freeze is downstream in the browser→spooler→printer print hand-off. The window used to
+  close ONLY on `window.onafterprint`; if that never fires (printer/spooler stalls, OR the known
+  browser quirk where onafterprint doesn't fire on silent print), the window sits "stuck in
+  transit". **Fix (print-label-both.tsx, additive): a 12s fallback `setTimeout(safeClose)` closes
+  the window even if onafterprint never arrives** (job is already in the OS spooler by then, so
+  closing doesn't cancel it); `safeClose` is idempotent. CAVEAT: cannot rescue a still-open
+  NATIVE print dialog — `window.print()` blocks JS while a dialog is up — so this fully fixes it
+  only if stations are set to silent/auto-print (no dialog). **Open Qs for client: is
+  kiosk/silent printing configured? does the freeze show a print dialog? cluster on one
+  station/printer?** Build clean. Pending push.
+- **Auth fix CONFIRMED working in prod (same log pull):** zero 401s / zero error-level lines in
+  the hour; at 14:03:05 UTC a session expired and 1.2.1 silently re-authed (`No valid session
+  found` → `Requesting offline access token` → `Creating new session` → 200). Stations
+  reboot+relogin daily, so they run current code — the earlier "401 still happened" was
+  pre-fix/pre-reboot. redirect_urls/auth-path cleanup still queued.
+- **Print-freeze investigation RESOLVED (decision made) — the "Open Qs" above are now answered.**
+  - Client confirmed the stations use a **native print DIALOG (NOT silent printing)**, and during
+    a freeze "the preview image shows in the browser window rather than the print-preview pop-up…
+    no controls… it freezes the whole browser and all tabs." So this is the browser's **print-
+    preview hanging**, which is browser-MODAL → **all JS in every tab freezes.** KEY CONSEQUENCE:
+    **no code can rescue this freeze** — not the 12s fallback, not a watchdog, not an auto-recall/
+    auto-click — because nothing executes anywhere in the browser while it's locked. The 12s
+    fallback only ever helped the *milder* "window didn't close but browser still alive" case.
+  - **The only thing that PREVENTS the freeze is removing the print-preview step** i.e. **silent/
+    kiosk printing** (Chrome/Edge `--kiosk-printing` launch flag + label printer as Windows
+    default). It acts BEFORE JS can freeze; nothing app-side can.
+  - **EasyScan comparison (client asked "why never them?"):** inspected a live EasyScan print —
+    it generates a **PDF blob** (`blob:https://es.506.io/…`) and opens it in the browser's **PDF
+    viewer**, then prints from there. So EasyScan is NOT direct-to-printer (my earlier guess was
+    wrong); its robustness comes from (a) printing a **finalized PDF** (much lighter render than
+    our live-HTML `window.print()`, so it hangs far less) and (b) the label **persisting as a
+    re-printable document** (never "loses the action"). Option B for us = mirror that (generate a
+    PDF, open in viewer) — considered, **shelved**: doesn't kill the freeze unless paired with
+    silent printing or manual-print, and porting our exact 57×25mm thermal labels + barcode
+    crispness (scan-critical) + swatch-bundle/no-barcode/yards variants to a PDF lib is real
+    re-test risk on the LOCKED label rendering. Never attempted historically (confirmed: no
+    pdf/blob/jspdf ref anywhere in git history).
+  - **CLIENT DECISION (final): accept the occasional freeze; rely on "Reprint last cut" to
+    recover.** They declined silent printing for now (didn't want to configure each station) and
+    did not want the PDF rewrite. So: **ship the two safety nets (12s fallback close + Reprint
+    last cut strip), make NO change to the print path.** If freezes ever become intolerable, the
+    on-the-shelf fix is silent printing (station config, no code) — offer it again then.
+  - This session: SHIPPED the two safety nets to production (committed + pushed).
+
 ### 2026-07-31
 - **Bin & Barcode → running-list BATCH flow** (client request — EasyScan-style). Replaced the
   single-item screen with a running list: each scan/Enter looks up the variant and appends it

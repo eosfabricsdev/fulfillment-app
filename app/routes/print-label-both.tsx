@@ -172,16 +172,32 @@ export default function PrintLabelBothPage() {
       // Barcode render failed — still print/close rather than freeze.
     }
 
-    window.onafterprint = () => {
+    // Close the window once printing is done. We can't rely on `onafterprint`
+    // ALONE: sometimes the print hand-off stalls (printer/spooler busy) or the
+    // browser simply never fires the event even though the label printed — either
+    // way the window used to sit "stuck in transit" until it was force-closed.
+    let closed = false;
+    const safeClose = () => {
+      if (closed) return;
+      closed = true;
       window.close();
     };
+    window.onafterprint = safeClose;
 
     const printTimer = setTimeout(() => {
       window.print();
     }, 250);
 
+    // Fallback: if `onafterprint` never arrives, close the window anyway so it
+    // can't freeze. By the time this fires the print job is already queued in the
+    // OS spooler, so closing the window doesn't cancel it. (This can't rescue a
+    // still-open NATIVE print dialog — window.print() blocks JS while a dialog is
+    // up — which only matters if these stations aren't set to silent/auto print.)
+    const fallbackTimer = setTimeout(safeClose, 12000);
+
     return () => {
       clearTimeout(printTimer);
+      clearTimeout(fallbackTimer);
       window.onafterprint = null;
     };
   }, []);
