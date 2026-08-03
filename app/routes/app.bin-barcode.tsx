@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { useEffect, useRef, useState } from "react";
 import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
-import { useFetcher } from "react-router";
+import { useFetcher, useLoaderData } from "react-router";
 import { authenticate } from "../shopify.server";
 
 // "Bin & Barcode" tool — scan/type barcodes or SKUs into a RUNNING LIST, then
@@ -22,8 +22,9 @@ function splitBins(value: string): string[] {
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.admin(request);
-  return {};
+  const { session } = await authenticate.admin(request);
+  // Needed to build new-tab admin product links (same convention as the cut list).
+  return { shop: session.shop };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -46,7 +47,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               sku
               barcode
               image { url }
-              product { title featuredImage { url } }
+              product { id title featuredImage { url } }
               metafield(namespace: "${BIN_NAMESPACE}", key: "${BIN_KEY}") {
                 value
                 type
@@ -71,6 +72,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         sku: n.sku,
         barcode: n.barcode,
         productTitle: n.product?.title ?? "",
+        productId: n.product?.id ? String(n.product.id).split("/").pop() : null,
         imageUrl: n.image?.url ?? n.product?.featuredImage?.url ?? null,
         currentBin: n.metafield?.value ?? "",
         metafieldType: n.metafield?.type ?? "single_line_text_field",
@@ -194,8 +196,15 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function BinBarcodePage() {
+  const data = useLoaderData<typeof loader>();
   const lookupFetcher = useFetcher();
   const updateFetcher = useFetcher();
+
+  // New-tab admin links, same convention as the cut list (full https URL +
+  // target="_blank", NOT shopify:// deep links — those steal the embedded frame).
+  const storeHandle = (data.shop || "").replace(".myshopify.com", "");
+  const adminUrl = (resource: "products", id: string) =>
+    `https://admin.shopify.com/store/${storeHandle}/${resource}/${id}`;
 
   const [query, setQuery] = useState("");
   const [scanQueue, setScanQueue] = useState<string[]>([]); // pending scans to look up
@@ -444,7 +453,16 @@ export default function BinBarcodePage() {
                     )}
                     <div style={{ flex: "1 1 auto", minWidth: 0 }}>
                       <s-stack gap="small-500">
-                        <s-text type="strong">{it.productTitle}</s-text>
+                        {it.productId ? (
+                          <s-link
+                            href={adminUrl("products", it.productId)}
+                            target="_blank"
+                          >
+                            {it.productTitle}
+                          </s-link>
+                        ) : (
+                          <s-text type="strong">{it.productTitle}</s-text>
+                        )}
                         <s-text color="subdued">
                           {it.sku ? `SKU: ${it.sku}` : ""}
                           {it.barcode ? ` | ${it.barcode}` : ""}

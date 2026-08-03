@@ -307,6 +307,14 @@ Note: `app._index.tsx`, `app.history.tsx`, `app.diagnose.tsx` use `// @ts-nochec
 > any thread the next session should pick up.
 
 ### 2026-08-03
+- **Bin & Barcode: product title in the running list now links to the admin product page**
+  (client request — "just like the cut list"). Followed the LOCKED new-tab convention exactly:
+  loader returns `session.shop`; `storeHandle` + `adminUrl("products", id)` build a full
+  `https://admin.shopify.com/store/<handle>/products/<id>` URL; the lookup query now pulls
+  `product { id }` and the item carries a numeric `productId` (GID `.split("/").pop()`); title
+  renders as `<s-link … target="_blank">` (NOT `shopify://` — that hijacks the embedded frame),
+  falls back to plain strong text if no id. Scoped entirely to app.bin-barcode.tsx. Build clean.
+  Shipped to production (committed + pushed).
 - **NEW: "Reprint last cut" strip** (client request — crash-proof freeze recovery). Sits in the
   open space to the right of the search bar; shows **Order No · Product Title · SKU** + a
   **Reprint** button (reprints BOTH bin + product labels in one window). Source is the
