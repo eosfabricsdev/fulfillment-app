@@ -375,6 +375,28 @@ Note: `app._index.tsx`, `app.history.tsx`, `app.diagnose.tsx` use `// @ts-nochec
     last cut strip), make NO change to the print path.** If freezes ever become intolerable, the
     on-the-shelf fix is silent printing (station config, no code) — offer it again then.
   - This session: SHIPPED the two safety nets to production (committed + pushed).
+- **"200" blank screen recurred once (~18:20 ET) — diagnosed from a 30-min prod log CSV; NOT
+  a server fault.** Pulled the app's own Vercel logs (user-supplied CSV; the session's Vercel
+  MCP is connected to the WRONG account — do NOT use it, ask the user for a CSV). The 30-min
+  window was **100% clean**: zero 401s, zero 500s, zero error lines; every `/app.data`,
+  `/print-label-both` (6–23ms), and `/api/order-tags` returned **200**; a session token
+  refreshed cleanly at 18:18:11 (no bounce); **two distinct cutters** (two `sub` ids across
+  stations) both authed fine. A **new deployment cut over at ~18:20:30** (`deploymentId`
+  `dpl_FCfe7…` → `dpl_EnH2yM…` = the push landing). CONCLUSION: the "200" is the **client-side
+  App Bridge session-token re-auth bounce** (never logs server-side — that's why the server is
+  spotless), and its timing plausibly lines up with the deploy landing on an already-open tab
+  (bundle/version mismatch → full reload → brief re-auth flash → self-heals). Same class as the
+  2026-07-30 "200", fixed by 1.2.1 to self-recover; one manual reload clears a stuck one. Should
+  be one-time from the deploy (stations reboot+relogin daily onto the new bundle). If it recurs
+  WITHOUT a deploy, re-check the URL bar for `/auth/session-token` and dig further.
+- **Reprint-last-cut is per-cutter — depends on distinct Shopify logins.** Confirmed from the
+  loader ([app._index.tsx:470](app/routes/app._index.tsx#L470)): it resolves the acting user's
+  name via the online-token exchange (`associated_user`) and queries the most recent `CutEvent`
+  filtered `cutterName: staffMember.name`. So each station shows THAT cutter's own last cut —
+  BUT only if each cutter is logged into Shopify as their own staff user (same dependency that
+  makes per-cutter Cut History work). If stations share ONE login → all resolve the same name →
+  all show the same last cut; if name resolution fails → filter drops → shows shop-wide latest.
+  Mechanism verified single-cutter; a live TWO-cutter test still recommended.
 
 ### 2026-07-31
 - **Bin & Barcode → running-list BATCH flow** (client request — EasyScan-style). Replaced the
