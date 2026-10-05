@@ -65,7 +65,7 @@ function escapeHtml(value: string) {
 }
 
 function getQtyDisplay(quantity: number, variantTitle: string | null) {
-  if (variantTitle?.includes("By the Yard")) {
+  if (variantTitle?.toLowerCase().includes("by the yard")) {
     return `Yards: ${(quantity / 4).toFixed(2)}`;
   }
   return `${quantity} units`;

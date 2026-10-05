@@ -1803,10 +1803,15 @@ export default function CutListPage() {
     );
   };
 
+  // Case-insensitive: some variants are named "By The Yard" (capital T), which the
+  // old exact-case match missed -> the line showed/printed units instead of yards.
+  const isByTheYard = (variantTitle: string | null | undefined) =>
+    !!variantTitle?.toLowerCase().includes("by the yard");
+
   const getVariantTypeBadge = (variantTitle: string | null) => {
     if (!variantTitle) return null;
 
-    if (variantTitle.includes("By the Yard")) {
+    if (isByTheYard(variantTitle)) {
       return <s-badge tone="info">By the Yard</s-badge>;
     } else if (variantTitle.includes("Swatch Sample")) {
       return <s-badge tone="warning">Swatch Sample</s-badge>;
@@ -1819,7 +1824,7 @@ export default function CutListPage() {
   };
 
   const formatQuantity = (quantity: number, variantTitle: string | null) => {
-    if (variantTitle?.includes("By the Yard")) {
+    if (isByTheYard(variantTitle)) {
       return (
         <s-stack gap="small">
           <span style={{ fontSize: "1.25em", fontWeight: 700 }}>
@@ -3858,7 +3863,7 @@ const cellStyle = {
                               )}{" "}
                               swatches
                             </s-text>
-                          ) : !item.variantTitle?.includes("By the Yard") &&
+                          ) : !isByTheYard(item.variantTitle) &&
                           item.quantity > 1 ? (
                             <s-badge tone="critical">⚠️ {item.quantity} units</s-badge>
                           ) : (

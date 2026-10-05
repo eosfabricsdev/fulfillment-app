@@ -306,6 +306,28 @@ Note: `app._index.tsx`, `app.history.tsx`, `app.diagnose.tsx` use `// @ts-nochec
 > Newest first. One entry per working session. Keep it short: what changed, why, and
 > any thread the next session should pick up.
 
+### 2026-10-05
+- **Fixed: a by-the-yard line showed/printed UNITS instead of yards** (client report — Anita,
+  order #104640, "warm back coat lining - black", SKU 32821: red `⚠️ 10 units` badge, no blue
+  "By the Yard" badge, and the product label printed units). Root cause: yards-vs-units is
+  decided ONLY by the line's variant title containing the exact-case text `By the Yard`; this
+  product's variant is named **`By The Yard`** (capital T), so it fell through to units. The
+  storefront converts by some other rule, which is why the listing looked normal online.
+  - Fix: match case-insensitively. New `isByTheYard()` helper in app._index.tsx (used by
+    `getVariantTypeBadge`, `formatQuantity`, and the red-units-badge condition) + the same
+    lowercase match in `getQtyDisplay` in print-label-both.tsx. Label layout/barcodes untouched
+    — only the yards/units decision changed (user-approved; touches the locked label output).
+    Build clean. **Pending user test + push.**
+  - NOT changed: the order-admin extension ([ActionExtension.tsx](extensions/cut-list/src/ActionExtension.tsx)
+    lines ~676/864/877/1366) has the same exact-case check; needs `shopify app deploy` to ship,
+    so left for a separate decision. Also the other variant-name matches in `getVariantTypeBadge`
+    ("Swatch Sample", "Panel", "Yard Piece") are still exact-case (badge only; `isSwatch()` /
+    `isRollEnd()` already lowercase).
+- Dev note: Shopify CLI is 3.92.1 (4.x offered) — did not upgrade; single toml points at the
+  prod app with `automatically_update_urls_on_dev = true`.
+- Uncommitted going into this session (not from a logged session): `shopify-web-components.d.ts`
+  rewritten from the misnamed JSON config to an `s-app-nav` type declaration — confirm with user.
+
 ### 2026-08-03
 - **Bin & Barcode: product title in the running list now links to the admin product page**
   (client request — "just like the cut list"). Followed the LOCKED new-tab convention exactly:
