@@ -357,6 +357,15 @@ Note: `app._index.tsx`, `app.history.tsx`, `app.diagnose.tsx` use `// @ts-nochec
   counts and click targets untouched. Build clean. Verified by user in the desktop emulator;
   pushed to production — **pending check on a real phone.** (Gotcha while testing: a "super
   zoomed"/blank emulator view was Chrome page zoom on admin.shopify.com — Cmd+0 fixed it.)
+- **Fix (2026-10-20): on phones the filter cards couldn't be scrolled past "Orders Cut Log"** —
+  the page scrolled UNDER the header instead. Cause: the header wrapper is `position: sticky`;
+  with 2-column cards it's taller than a phone screen, and a sticky element taller than the
+  viewport can never scroll its lower part into view. Fix: sticky moved from inline style to
+  `.cutlist-sticky-header` with **`position: static` at ≤ 520px** (phones: header scrolls away
+  with the page; desktop/tablet stay sticky, unchanged). Also clamped `viewTop` to ≥ 0 in
+  `scrollToCurrentMatch` (a scrolled-off non-sticky header gives a negative bottom edge).
+  Trade-off on phones: rush alert banners + toggles scroll away with the header (they're at the
+  top of the page). Build clean. Pushed to production at user request — **pending check on a real phone.**
 - Check deploy status without the Vercel MCP: the repo is PUBLIC, so
   `curl https://api.github.com/repos/eosfabricsdev/fulfillment-app/commits/<sha>/status`
   shows Vercel's commit status ("Deployment has completed"). No `gh`/`vercel` CLI installed.

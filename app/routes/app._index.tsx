@@ -1231,7 +1231,12 @@ export default function CutListPage() {
     let viewTop: number;
     let viewBottom: number;
     if (isWindowScroller) {
-      viewTop = stickyHeaderRef.current?.getBoundingClientRect?.().bottom ?? 0;
+      // Clamped at 0: on phones the header is NOT sticky (see .cutlist-sticky-header)
+      // and can scroll off the top, leaving a negative bottom edge.
+      viewTop = Math.max(
+        0,
+        stickyHeaderRef.current?.getBoundingClientRect?.().bottom ?? 0,
+      );
       viewBottom = window.innerHeight || document.documentElement.clientHeight;
     } else {
       const sRect = scroller.getBoundingClientRect();
@@ -3223,16 +3228,22 @@ export default function CutListPage() {
 
   return (
     <s-page heading="Fulfillment Cut List" inlineSize="large">
-      <div
-        ref={stickyHeaderRef}
-        style={{
-          position: "sticky",
-          top: 0,
-          zIndex: 10,
-          background: "#fff",
-          paddingBottom: "0.5rem",
-        }}
-      >
+      {/* Sticky on desktop/tablet. On phones the header (2-column cards) is taller
+          than the screen, and a sticky element taller than the viewport can never
+          scroll its lower part into view — so below 520px it scrolls with the page. */}
+      <style>{`
+        .cutlist-sticky-header {
+          position: sticky;
+          top: 0;
+          z-index: 10;
+          background: #fff;
+          padding-bottom: 0.5rem;
+        }
+        @media (max-width: 520px) {
+          .cutlist-sticky-header { position: static; }
+        }
+      `}</style>
+      <div ref={stickyHeaderRef} className="cutlist-sticky-header">
       <div
         style={{
           display: "flex",
