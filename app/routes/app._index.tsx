@@ -3266,13 +3266,26 @@ export default function CutListPage() {
       </div>
       <div style={{ display: filtersCollapsed ? "none" : "block" }}>
       <s-section>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(7, minmax(0, 1fr))",
-            gap: "0.75rem",
-          }}
-        >
+        {/* Responsive card grid: 7 columns on desktop (unchanged), 4 on tablets /
+            narrow windows, 2 on phones so every card label stays legible. A media
+            query needs a stylesheet, hence the <style> tag (inline styles can't). */}
+        <style>{`
+          .cutlist-cards {
+            display: grid;
+            grid-template-columns: repeat(7, minmax(0, 1fr));
+            gap: 0.75rem;
+          }
+          @media (max-width: 900px) {
+            .cutlist-cards { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+          }
+          @media (max-width: 520px) {
+            .cutlist-cards {
+              grid-template-columns: repeat(2, minmax(0, 1fr));
+              gap: 0.5rem;
+            }
+          }
+        `}</style>
+        <div className="cutlist-cards">
           <s-box
             padding="base"
             background={currentFilter === "rush" ? "subdued" : "base"}

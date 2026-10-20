@@ -346,6 +346,20 @@ Note: `app._index.tsx`, `app.history.tsx`, `app.diagnose.tsx` use `// @ts-nochec
   desktop stations look unchanged. Note: hiding filters also hides Undo/Redo + the "Last
   updated" counter (they live in the card grid). Build clean. **Pending user test in dev
   preview (mobile + desktop).**
+  - Toggles **shipped** (commit `8291c3d`, Vercel "Deployment has completed"); user verified
+    on preview. Setting is per BROWSER (localStorage), not per cutter login — two cutters
+    sharing one station browser share it.
+- **NEW (2026-10-20): responsive filter-card grid** (client: on a small iPhone the 7-column
+  grid squeezed labels into unreadable fragments). Grid moved from inline style to a
+  `.cutlist-cards` class with a `<style>` tag (inline styles can't do media queries):
+  **7 columns > 900px (desktop unchanged), 4 columns ≤ 900px, 2 columns ≤ 520px (phones).**
+  Media queries respond to the embedded iframe's width. Cards themselves, their order,
+  counts and click targets untouched. Build clean. Verified by user in the desktop emulator;
+  pushed to production — **pending check on a real phone.** (Gotcha while testing: a "super
+  zoomed"/blank emulator view was Chrome page zoom on admin.shopify.com — Cmd+0 fixed it.)
+- Check deploy status without the Vercel MCP: the repo is PUBLIC, so
+  `curl https://api.github.com/repos/eosfabricsdev/fulfillment-app/commits/<sha>/status`
+  shows Vercel's commit status ("Deployment has completed"). No `gh`/`vercel` CLI installed.
 - Dev note: Shopify CLI is 3.92.1 (4.x offered) — did not upgrade; single toml points at the
   prod app with `automatically_update_urls_on_dev = true`.
 - Uncommitted going into this session (not from a logged session): `shopify-web-components.d.ts`
