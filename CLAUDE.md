@@ -58,7 +58,7 @@ tracks cut progress. It also logs per-cutter productivity.
 | [app/routes/app.bin-barcode.tsx](app/routes/app.bin-barcode.tsx) | **"Bin & Barcode" tab** (added 2026-07-30). **Running-list batch flow** (2026-07-31): scan/type multiple barcodes/SKUs into a list, then **Replace** or **Add** ONE `custom.bin_number` to all at once (EasyScan-style; e.g. consolidating roll ends). Own loader+action (leaf route); batch write via `nodes` read + chunked `metafieldsSet` (25/call). More tools planned for this tab. |
 | [app/routes/app.diagnose.tsx](app/routes/app.diagnose.tsx) | Debug route — runs several order queries to diagnose why an order is/isn't visible. |
 | [app/routes/app.tsx](app/routes/app.tsx) | App Bridge shell / nav. |
-| [extensions/cut-list/src/ActionExtension.tsx](extensions/cut-list/src/ActionExtension.tsx) | Shopify **order admin action** extension (~1,500 lines). |
+| [extensions/cut-list/src/ActionExtension.tsx](extensions/cut-list/src/ActionExtension.tsx) | Shopify admin action extension on the **product details** page ("More actions"; target `admin.product-details.action.render`, ~1,500 lines). An early prototype of the cut list, untouched since the first commit — NOT the app the warehouse uses. |
 | [prisma/schema.prisma](prisma/schema.prisma) | `Session` + `CutEvent` models. |
 
 ## Core concepts (important — non-obvious)
@@ -317,12 +317,35 @@ Note: `app._index.tsx`, `app.history.tsx`, `app.diagnose.tsx` use `// @ts-nochec
     `getVariantTypeBadge`, `formatQuantity`, and the red-units-badge condition) + the same
     lowercase match in `getQtyDisplay` in print-label-both.tsx. Label layout/barcodes untouched
     — only the yards/units decision changed (user-approved; touches the locked label output).
-    Build clean. **Pending user test + push.**
+    Build clean. **Shipped (pushed) + verified by user in the live store: the affected line
+    now shows yards and the "By the Yard" badge.**
   - NOT changed: the order-admin extension ([ActionExtension.tsx](extensions/cut-list/src/ActionExtension.tsx)
     lines ~676/864/877/1366) has the same exact-case check; needs `shopify app deploy` to ship,
     so left for a separate decision. Also the other variant-name matches in `getVariantTypeBadge`
     ("Swatch Sample", "Panel", "Yard Piece") are still exact-case (badge only; `isSwatch()` /
     `isRollEnd()` already lowercase).
+- **2026-10-20: `shopify app dev` failed with "Failed to start dev preview"** — cause:
+  [extensions/cut-list/shopify.extension.toml](extensions/cut-list/shopify.extension.toml) had
+  `api_version = "2025-10"`, which Shopify has retired (action extensions now require 2026-01+).
+  Bumped to `"2026-07"` (matches `shopify.app.toml`). Verified `shopify app dev` reaches "Ready".
+  Only affects the prototype extension; the main app ships via Vercel and is unaffected. Takes
+  effect in prod only on a future `shopify app deploy`. NOTE: `app/shopify.server.ts` still
+  pins `ApiVersion.October25` for Admin API calls — will also go out of support; installed
+  `@shopify/shopify-api` knows up to `April26`. Worth bumping as its own tested change.
+- **NEW (2026-10-20): collapsible header for phones/mobile app** (client: on iPhone the filter
+  cards + search + last-cut strip filled the screen, leaving 1-2 list rows visible). **Two
+  independent toggles** in a slim bar at the top of the sticky header (client asked to split
+  them): `▲/▼ Hide/Show filters` (the filter-card grid) and `▲/▼ Hide/Show search & last cut`
+  (the search + Reprint-last-cut row). Either, both, or neither can be hidden.
+  **Display-only (`display:none`) — content stays mounted**, so card counts, search highlights,
+  Undo/Redo, "Last updated" and Reprint all keep working; nothing locked touched. Rush alert
+  banners stay OUTSIDE both wrappers (always visible). The bar shows the active filter
+  (`FILTER_LABELS`) when filters are hidden and the active search text when search is hidden.
+  State `filtersCollapsed` / `searchRowCollapsed`, remembered per device in localStorage
+  (`cutlistFiltersCollapsed` / `cutlistSearchRowCollapsed`); **both default to shown** so
+  desktop stations look unchanged. Note: hiding filters also hides Undo/Redo + the "Last
+  updated" counter (they live in the card grid). Build clean. **Pending user test in dev
+  preview (mobile + desktop).**
 - Dev note: Shopify CLI is 3.92.1 (4.x offered) — did not upgrade; single toml points at the
   prod app with `automatically_update_urls_on_dev = true`.
 - Uncommitted going into this session (not from a logged session): `shopify-web-components.d.ts`

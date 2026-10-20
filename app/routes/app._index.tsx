@@ -1061,6 +1061,53 @@ export default function CutListPage() {
   const searchRangesRef = useRef<Range[]>([]);
   const searchContainerRef = useRef<any>(null);
   const stickyHeaderRef = useRef<any>(null);
+
+  // Collapsible header sections so small screens (phones / the Shopify mobile
+  // app) can see the list. Two independent toggles: the filter-card grid, and the
+  // search + last-cut row. Display-only: hidden content stays mounted, so counts,
+  // search, undo and reprint keep working. Remembered per device; both default to
+  // shown so desktop stations are unchanged.
+  const [filtersCollapsed, setFiltersCollapsed] = useState<boolean>(false);
+  const [searchRowCollapsed, setSearchRowCollapsed] = useState<boolean>(false);
+  useEffect(() => {
+    try {
+      if (window.localStorage.getItem("cutlistFiltersCollapsed") === "1") {
+        setFiltersCollapsed(true);
+      }
+      if (window.localStorage.getItem("cutlistSearchRowCollapsed") === "1") {
+        setSearchRowCollapsed(true);
+      }
+    } catch {}
+  }, []);
+  const makeCollapseToggle =
+    (setter: (fn: (prev: boolean) => boolean) => void, key: string) => () =>
+      setter((prev) => {
+        const next = !prev;
+        try {
+          window.localStorage.setItem(key, next ? "1" : "0");
+        } catch {}
+        return next;
+      });
+  const toggleFiltersCollapsed = makeCollapseToggle(
+    setFiltersCollapsed,
+    "cutlistFiltersCollapsed",
+  );
+  const toggleSearchRowCollapsed = makeCollapseToggle(
+    setSearchRowCollapsed,
+    "cutlistSearchRowCollapsed",
+  );
+  const FILTER_LABELS: Record<string, string> = {
+    all: "All",
+    rush: "Rush Orders",
+    rollEnds: "Roll Ends Only",
+    swatches: "Swatches Only",
+    totalSwatches: "Total Swatches to Pick",
+    multiple: "Customers with Multiple Orders",
+    localPickup: "Local Pickup",
+    hold: "Fulfillment Hold",
+    readyToShip: "Ready to Ship",
+    pickedToday: "Cut Log",
+  };
   const SEARCH_HL = "cutlist-search";
   const SEARCH_HL_CURRENT = "cutlist-search-current";
 
@@ -3186,6 +3233,38 @@ export default function CutListPage() {
           paddingBottom: "0.5rem",
         }}
       >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          flexWrap: "wrap",
+          gap: "0.5rem",
+          padding: "0.25rem 0",
+        }}
+      >
+        <s-text color="subdued">
+          {[
+            filtersCollapsed
+              ? `Filter: ${FILTER_LABELS[currentFilter] ?? currentFilter}`
+              : "",
+            searchRowCollapsed && searchQuery ? `Search: "${searchQuery}"` : "",
+          ]
+            .filter(Boolean)
+            .join(" · ")}
+        </s-text>
+        <s-stack direction="inline" gap="small">
+          <s-button variant="tertiary" onClick={toggleFiltersCollapsed}>
+            {filtersCollapsed ? "▼ Show filters" : "▲ Hide filters"}
+          </s-button>
+          <s-button variant="tertiary" onClick={toggleSearchRowCollapsed}>
+            {searchRowCollapsed
+              ? "▼ Show search & last cut"
+              : "▲ Hide search & last cut"}
+          </s-button>
+        </s-stack>
+      </div>
+      <div style={{ display: filtersCollapsed ? "none" : "block" }}>
       <s-section>
         <div
           style={{
@@ -3426,6 +3505,8 @@ export default function CutListPage() {
           </s-box>
         </div>
       </s-section>
+      </div>
+      <div style={{ display: searchRowCollapsed ? "none" : "block" }}>
       <s-section padding="none">
         <s-stack direction="inline" gap="base" alignItems="center">
           <div style={{ minWidth: "260px" }}>
@@ -3515,6 +3596,7 @@ export default function CutListPage() {
           )}
         </s-stack>
       </s-section>
+      </div>
       {newRushAlerts.length > 0 && (
         <s-section>
           <s-stack gap="small">
