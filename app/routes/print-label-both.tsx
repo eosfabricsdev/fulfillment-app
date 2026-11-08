@@ -20,6 +20,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
 
   const orderName = url.searchParams.get("orderName") || "TEST ORDER";
+  const customerName = url.searchParams.get("customerName") || "";
   const includeBin = url.searchParams.get("includeBin") !== "false";
   const includeCut = url.searchParams.get("includeCut") !== "false";
 
@@ -50,6 +51,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
   return {
     orderName,
+    customerName,
     includeBin,
     includeCut,
     items,
@@ -71,14 +73,14 @@ function getQtyDisplay(quantity: number, variantTitle: string | null) {
   return `${quantity} units`;
 }
 
-function generateBinLabelHtml(orderName: string): string {
+function generateBinLabelHtml(orderName: string, customerName: string): string {
   const orderNum = orderName.replace("#", "");
   const safeOrderName = escapeHtml(orderName);
 
   return `
     <section class="label-page">
       <div class="label-shell bin-label">
-        <div class="bin-label-prefix">ORDER</div>
+        <div class="bin-label-prefix">${escapeHtml(customerName) || "ORDER"}</div>
         <div class="bin-order">${safeOrderName}</div>
         <div class="barcode-wrap">
           <svg
@@ -203,7 +205,7 @@ export default function PrintLabelBothPage() {
   }, []);
 
   const html = `
-    ${data.includeBin ? generateBinLabelHtml(data.orderName) : ""}
+    ${data.includeBin ? generateBinLabelHtml(data.orderName, data.customerName) : ""}
     ${
       data.includeCut
         ? data.items
@@ -292,6 +294,10 @@ export default function PrintLabelBothPage() {
             line-height: 1;
             margin-bottom: 0.3mm;
             letter-spacing: 0.8px;
+            max-width: 100%;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
           }
 
           .bin-order {

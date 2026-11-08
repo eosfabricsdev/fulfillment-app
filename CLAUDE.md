@@ -306,6 +306,50 @@ Note: `app._index.tsx`, `app.history.tsx`, `app.diagnose.tsx` use `// @ts-nochec
 > Newest first. One entry per working session. Keep it short: what changed, why, and
 > any thread the next session should pick up.
 
+### 2026-11-08
+- **Bin label: the small top line now shows the CUSTOMER NAME instead of the word "ORDER"**
+  (client request; touches the locked label output, user-approved). All 5 print call sites in
+  app._index.tsx now pass `&customerName=` (`item.customerName`, or `swatches[0].customerName`
+  for bundles; = `customer.displayName`, "Guest" if none); print-label-both.tsx renders it in
+  `.bin-label-prefix` (same 7pt style, plus nowrap + ellipsis so a long name can't wrap/push the
+  barcode). Falls back to "ORDER" if the param is missing. Order number, barcode, cut labels
+  untouched. Build clean. **Verified by user in dev preview.** Not yet pushed.
+- **Fixed (likely cause): intermittent "Application Error" screen on PHONE only** (user's iPhone,
+  ~2 days; desktop fine; cleared on its own). The screen is React Router's root default boundary,
+  which on Safari prints only the stack (no message). Decoded the stack by rebuilding the deployed
+  commit `313a4f5` locally — asset hashes matched prod exactly (`entry.client-NiQJJygO.js` etc.,
+  200 from Vercel) — so the minified names map 1:1: top frame `ref` = one of our inline callback
+  refs, called from React's `commitAttachRef` (`to`) inside commitRoot (`mf`). Three `<s-modal>`
+  callback refs (product-count, ready-to-ship, image-preview) called `el.showOverlay()` /
+  `el.hideOverlay()` **unguarded** on every commit; if the Polaris web-components script hasn't
+  upgraded `<s-modal>` yet (slow mobile load), the method is undefined → TypeError → whole page
+  replaced by the error screen. Every other modal call already used `?.()`. Fix: same `?.()` guard
+  on those 6 calls — no behavior change once loaded. Can't repro on demand (timing); confirm by
+  no recurrence on phone. Gotcha for future stack decoding: Safari stack = `name@url:line:col`,
+  and the iPhone screenshot truncated the URLs — rebuilding the exact deployed commit is how to map.
+
+### 2026-10-28 (store outage — not an app change)
+- **Shopify accidentally deleted the EOS store**; they're restoring it. The cut list is down
+  until then (nothing app-side can help). Put up a temporary "be back soon" page:
+  Cloudflare Worker `eos-back-soon` (returns **503** + `Retry-After` so Google treats it as
+  temporary; contact info@eosfabrics.com), routes `eosfabrics.com/*` + `www.eosfabrics.com/*`,
+  and the apex A (`23.227.38.65`) + `www` CNAME (`emmaonesock.myshopify.com`) switched to
+  **Proxied**. No other DNS records touched (email = Proofpoint MX + Microsoft 365; `go.`/`s.`
+  are on Vercel 76.76.21.21 — deliberately NOT covered by the routes). Verified all variants
+  serve the page; MX intact. User holds a full DNS export (2026-10-29 02:30) as backup.
+  - **RESOLVED (by 2026-11-08):** store restored; DNS records back to DNS-only and both Worker
+    routes deleted (user confirmed). Cut list working "mostly normally" with no reinstall needed.
+    After the restore, Shopify Email needed NEW sender-auth CNAMEs (`mailer6nt`, `6nt._domainkey`,
+    `6nt2._domainkey`, `maileroud`, `pdk1/pdk2._domainkey.maileroud`), added in **Cloudflare**
+    (DNS-only), not GoDaddy, which is only the registrar. DMARC/SPF were untouched.
+  - **UNDO when Shopify confirms restore:** apex A + `www` CNAME back to **DNS only** (grey),
+    delete both Worker routes (or the Worker), confirm site loads, then Shopify Admin →
+    Settings → Domains → Verify connection if needed.
+  - **After restore, check the fulfillment app.** If it must be REINSTALLED, the parked
+    `redirect_urls = .../api/auth` mismatch (see Known quirks) may break the install — fix
+    that first (point at the real `/auth` callback, `shopify app deploy`). Sessions/offline
+    tokens in the DB may also be invalid for a recreated store.
+
 ### 2026-10-05
 - **Fixed: a by-the-yard line showed/printed UNITS instead of yards** (client report — Anita,
   order #104640, "warm back coat lining - black", SKU 32821: red `⚠️ 10 units` badge, no blue
@@ -365,7 +409,7 @@ Note: `app._index.tsx`, `app.history.tsx`, `app.diagnose.tsx` use `// @ts-nochec
   with the page; desktop/tablet stay sticky, unchanged). Also clamped `viewTop` to ≥ 0 in
   `scrollToCurrentMatch` (a scrolled-off non-sticky header gives a negative bottom edge).
   Trade-off on phones: rush alert banners + toggles scroll away with the header (they're at the
-  top of the page). Build clean. Pushed to production at user request — **pending check on a real phone.**
+  top of the page). Build clean. Pushed to production at user request (`313a4f5`); scrolling confirmed on a real phone. (A "toggles do nothing on mobile" scare was just an open order-note modal blocking taps — not a bug.)
 - Check deploy status without the Vercel MCP: the repo is PUBLIC, so
   `curl https://api.github.com/repos/eosfabricsdev/fulfillment-app/commits/<sha>/status`
   shows Vercel's commit status ("Deployment has completed"). No `gh`/`vercel` CLI installed.

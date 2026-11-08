@@ -2764,7 +2764,7 @@ export default function CutListPage() {
         : new Map<string, SubstituteResult>();
     const expanded = expandSilkSwatchForPrint(item, substitutes);
     const itemsParam = encodeURIComponent(JSON.stringify(expanded));
-    const url = `/print-label-both?orderName=${encodeURIComponent(item.orderName)}&items=${itemsParam}&includeBin=${includeBin}&includeCut=${includeCut}`;
+    const url = `/print-label-both?orderName=${encodeURIComponent(item.orderName)}&customerName=${encodeURIComponent(item.customerName || "")}&items=${itemsParam}&includeBin=${includeBin}&includeCut=${includeCut}`;
 
     if (!skipWindow) {
       window.open(url, "_blank");
@@ -2831,7 +2831,7 @@ export default function CutListPage() {
         : new Map<string, SubstituteResult>();
     const expanded = expandSilkSwatchForPrint(item, substitutes);
     const itemsParam = encodeURIComponent(JSON.stringify(expanded));
-    const url = `/print-label-both?orderName=${encodeURIComponent(item.orderName)}&items=${itemsParam}&includeBin=${mode === "bin" ? "true" : "false"}&includeCut=${includeCut ? "true" : "false"}`;
+    const url = `/print-label-both?orderName=${encodeURIComponent(item.orderName)}&customerName=${encodeURIComponent(item.customerName || "")}&items=${itemsParam}&includeBin=${mode === "bin" ? "true" : "false"}&includeCut=${includeCut ? "true" : "false"}`;
     window.open(url, "_blank");
   };
 
@@ -2854,7 +2854,7 @@ export default function CutListPage() {
       : new Map<string, SubstituteResult>();
     const expanded = expandSilkSwatchForPrint(item, substitutes);
     const itemsParam = encodeURIComponent(JSON.stringify(expanded));
-    const url = `/print-label-both?orderName=${encodeURIComponent(item.orderName)}&items=${itemsParam}&includeBin=true&includeCut=true`;
+    const url = `/print-label-both?orderName=${encodeURIComponent(item.orderName)}&customerName=${encodeURIComponent(item.customerName || "")}&items=${itemsParam}&includeBin=true&includeCut=true`;
     window.open(url, "_blank");
   };
 
@@ -3031,7 +3031,7 @@ export default function CutListPage() {
     );
     const itemsParam = encodeURIComponent(JSON.stringify(expanded));
     window.open(
-      `/print-label-both?orderName=${encodeURIComponent(orderName)}&items=${itemsParam}&includeBin=true&includeCut=true`,
+      `/print-label-both?orderName=${encodeURIComponent(orderName)}&customerName=${encodeURIComponent(swatches[0].customerName || "")}&items=${itemsParam}&includeBin=true&includeCut=true`,
       "_blank",
     );
   };
@@ -3174,7 +3174,7 @@ export default function CutListPage() {
       expandSilkSwatchForPrint(s, substitutes),
     );
     const itemsParam = encodeURIComponent(JSON.stringify(expanded));
-    const url = `/print-label-both?orderName=${encodeURIComponent(orderName)}&items=${itemsParam}&includeBin=true&includeCut=true`;
+    const url = `/print-label-both?orderName=${encodeURIComponent(orderName)}&customerName=${encodeURIComponent(swatches[0].customerName || "")}&items=${itemsParam}&includeBin=true&includeCut=true`;
     window.open(url, "_blank");
 
     const itemsNow = getFilteredItems();
@@ -4238,9 +4238,9 @@ const cellStyle = {
         heading={`Items in ${productCountModalOrderName}`}
         ref={(el) => {
           if (el && showProductCountModal) {
-            el.showOverlay();
+            el.showOverlay?.();
           } else if (el && !showProductCountModal) {
-            el.hideOverlay();
+            el.hideOverlay?.();
           }
         }}
         onHide={() => setShowProductCountModal(false)}
@@ -4273,9 +4273,9 @@ const cellStyle = {
         heading="Mark items as Ready to Ship"
         ref={(el) => {
           if (el && readyToShipModalOrderId) {
-            el.showOverlay();
+            el.showOverlay?.();
           } else if (el && !readyToShipModalOrderId) {
-            el.hideOverlay();
+            el.hideOverlay?.();
           }
         }}
         onHide={() => setReadyToShipModalOrderId(null)}
@@ -4452,9 +4452,9 @@ const cellStyle = {
         heading={previewImage?.alt || "Product Image"}
         ref={(el) => {
           if (el && previewImage) {
-            el.showOverlay();
+            el.showOverlay?.();
           } else if (el && !previewImage) {
-            el.hideOverlay();
+            el.hideOverlay?.();
           }
         }}
         onHide={() => setPreviewImage(null)}
